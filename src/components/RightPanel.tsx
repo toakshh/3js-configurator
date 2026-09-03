@@ -6,7 +6,8 @@ import TransformTab from "./TransformTab";
 import InfoTab from "./InfoTab";
 import { ViewportRefs, applyHistoryStep } from "@/hooks/useViewport";
 import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
-import { useState, useEffect, useCallback } from "react";
+import { useEffect, useCallback } from "react";
+import { toast } from "react-hot-toast";
 
 const TABS: { id: ActiveTab; label: string; icon: string }[] = [
   { id: "material", label: "Material", icon: "🎨" },
@@ -22,15 +23,9 @@ export default function RightPanel({
   const store = useGLBStore();
   const selectedEntry = store.meshEntries.find((e) => e.uuid === store.selectedUUID);
   const multiCount = store.selectedUUIDs.size;
-  const [toast, setToast] = useState<{ msg: string; type: "success" | "warn" } | null>(null);
 
   const canUndo = store.historyIndex > 0;
   const canRedo = store.historyIndex < store.history.length - 1;
-
-  const showToast = (msg: string, type: "success" | "warn" = "success") => {
-    setToast({ msg, type });
-    setTimeout(() => setToast(null), 2800);
-  };
 
   const doUndo = useCallback(() => {
     const step = store.undo();
@@ -67,7 +62,9 @@ export default function RightPanel({
 
   const exportGLB = () => {
     const root = vpRefs.current.gltfRoot;
-    if (!root) { alert("Load a GLB first"); return; }
+    if (!root) { toast.error("Load a GLB first"); return; }
+
+    const loadingToast = toast.loading("Exporting GLB...");
 
     // Temporarily restore emissive for selected meshes so highlight doesn't bake in
     const restoreList: { uuid: string; emissive: number; emissiveIntensity: number }[] = [];
@@ -101,9 +98,12 @@ export default function RightPanel({
           mats.forEach((m: any) => { if (m.emissive) { m.emissive.set(0xff6b35); m.emissiveIntensity = 0.3; } });
         });
 
-        showToast("✓ Exported as configured.glb");
+        toast.success("Exported as configured.glb", { id: loadingToast });
       },
-      (err) => { console.error(err); alert("Export failed: " + err); },
+      (err) => { 
+        console.error(err); 
+        toast.error("Export failed: " + err, { id: loadingToast });
+      },
       { binary: true }
     );
   };
@@ -126,10 +126,13 @@ export default function RightPanel({
         m.wireframe = snap.wireframe;
         m.flatShading = snap.flatShading;
         m.side = snap.side;
+        m.depthWrite = snap.depthWrite;
+        m.blending = snap.blending;
+        if ("envMapIntensity" in m) m.envMapIntensity = snap.envMapIntensity;
         m.needsUpdate = true;
       });
     });
-    showToast("↺ All materials reset", "warn");
+    toast("All materials reset to original", { icon: "↺" });
     store.setMeshEntries([...store.meshEntries]);
   };
 
@@ -151,7 +154,7 @@ export default function RightPanel({
                 ? `${multiCount} meshes selected`
                 : "No mesh selected"}
             </h2>
-            <p className="text-[10px] text-[#3a4270] mt-0.5">
+            <p className="text-[10px] text-[#3a4270] mt-0.5 mt-1">
               {selectedEntry
                 ? `${selectedEntry.vertexCount.toLocaleString()} verts · ${selectedEntry.materialType}`
                 : multiCount > 1
@@ -214,7 +217,7 @@ export default function RightPanel({
         </button>
         <div className="flex-1" />
         <span className="text-[9px] text-[#1e2440] font-mono">
-          {store.historyIndex + 1}/{store.history.length}
+          {store.history.length > 0 ? `${store.historyIndex + 1}/${store.history.length}` : "0/0"}
         </span>
       </div>
 
@@ -232,33 +235,23 @@ export default function RightPanel({
       </div>
 
       {/* ── Export / Reset bar ─────────────────────────── */}
-      <div className="px-4 py-4 border-t border-[#1a1f38] bg-[#0c0f1e] space-y-2 shrink-0">
+      <div className="px-5 py-4 border-t border-[#1a1f38] bg-[#0c0f1e] space-y-3 shrink-0">
         <button
           onClick={exportGLB}
-          className="w-full bg-gradient-to-r from-[#5b6ef5] to-[#7c5bf5] hover:from-[#6b7eff] hover:to-[#8c6bff] text-white font-semibold py-3 rounded-xl text-[13px] transition-all shadow-lg shadow-[#5b6ef5]/20 flex items-center justify-center gap-2.5"
+          className="w-full bg-gradient-to-r from-[#5b6ef5] to-[#7c5bf5] hover:from-[#6b7eff] hover:to-[#8c6bff] text-white font-semibold py-3.5 rounded-xl text-[13px] transition-all shadow-lg shadow-[#5b6ef5]/20 flex items-center justify-center gap-2.5"
         >
-          <svg width={15} height={15} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}>
+          <svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}>
             <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3" />
           </svg>
           Export Modified .glb
         </button>
         <button
           onClick={resetAll}
-          className="w-full bg-[#12152a] border border-[#1e2440] hover:border-[#5b6ef5]/50 text-[#4a5280] hover:text-[#7880a8] py-2 rounded-xl text-[12px] transition-all"
+          className="w-full bg-[#12152a] border border-[#1e2440] hover:border-[#5b6ef5]/50 text-[#4a5280] hover:text-[#7880a8] py-2.5 rounded-xl text-[12px] font-medium transition-all"
         >
-          ↺ Reset All Materials to Original
+          ↺ Revert All to Original
         </button>
       </div>
-
-      {/* ── Toast ──────────────────────────────────────── */}
-      {toast && (
-        <div
-          className={`fixed bottom-6 left-1/2 -translate-x-1/2 text-white text-[12px] font-semibold px-5 py-2.5 rounded-full shadow-xl z-50 transition-all
-            ${toast.type === "success" ? "bg-[#4caf90]" : "bg-[#f5a623]"}`}
-        >
-          {toast.msg}
-        </div>
-      )}
     </div>
   );
 }

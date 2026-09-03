@@ -80,6 +80,7 @@ interface GLBStore {
   // range-select up to uuid
   rangeSelectMesh: (uuid: string) => void;
   clearSelection: () => void;
+  removeMesh: (uuid: string) => void;
 
   setActiveTab: (tab: ActiveTab) => void;
   setSearchQuery: (q: string) => void;
@@ -159,6 +160,19 @@ export const useGLBStore = create<GLBStore>((set, get) => ({
     }),
 
   clearSelection: () => set({ selectedUUID: null, selectedUUIDs: new Set() }),
+
+  removeMesh: (uuid) => 
+    set((state) => {
+      const nextMeshEntries = state.meshEntries.filter(m => m.uuid !== uuid);
+      const nextSelected = new Set(state.selectedUUIDs);
+      nextSelected.delete(uuid);
+      const nextPrimary = state.selectedUUID === uuid ? null : state.selectedUUID;
+      return {
+        meshEntries: nextMeshEntries,
+        selectedUUIDs: nextSelected,
+        selectedUUID: nextPrimary
+      };
+    }),
 
   setActiveTab: (activeTab) => set({ activeTab }),
   setSearchQuery: (searchQuery) => set({ searchQuery }),
