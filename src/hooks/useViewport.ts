@@ -5,8 +5,8 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
-import { Line2 } from "three/examples/jsm/lines/Line2.js";
-import { LineGeometry } from "three/examples/jsm/lines/LineGeometry.js";
+import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
+import { LineSegmentsGeometry } from "three/examples/jsm/lines/LineSegmentsGeometry.js";
 import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 import { useGLBStore, MeshEntry, HistoryStep } from "@/store/glbStore";
 import { snapshotMaterial, applySnapshot } from "@/lib/matUtils";
@@ -28,7 +28,7 @@ export interface ViewportRefs {
 
   // Selection outline system (added directly to main scene)
   outlineGroup: THREE.Group;
-  outlineLines: Map<string, Line2>;
+  outlineLines: Map<string, LineSegments2>;
   outlineMaterial: LineMaterial;
 }
 
@@ -37,14 +37,14 @@ export interface ViewportRefs {
 function createOutlineMaterial(): LineMaterial {
   return new LineMaterial({
     color: 0x7c8bff,
-    linewidth: 3, // pixels wide
+    linewidth: 2,
     dashed: true,
     dashScale: 1,
-    dashSize: 6,
-    gapSize: 4,
+    dashSize: 0.08,
+    gapSize: 0.06,
     dashOffset: 0,
     transparent: true,
-    opacity: 0.9,
+    opacity: 0.95,
     depthTest: false, // always draw on top of mesh
     resolution: new THREE.Vector2(
       typeof window !== "undefined" ? window.innerWidth : 1920,
@@ -57,45 +57,17 @@ function addOutline(uuid: string, mesh: THREE.Mesh, r: ViewportRefs) {
   if (r.outlineLines.has(uuid)) return;
 
   mesh.updateMatrixWorld(true);
-  const box = new THREE.Box3().setFromObject(mesh);
-  if (box.isEmpty()) return;
+  // Extract edges from the mesh geometry (like Photoshop marching-ants)
+  const edges = new THREE.EdgesGeometry(mesh.geometry, 15); // 15° threshold
+  // Convert to LineSegmentsGeometry positions
+  const segGeom = new LineSegmentsGeometry();
+  segGeom.setPositions(edges.attributes.position.array as Float32Array);
 
-  const min = box.min;
-  const max = box.max;
-  const size = box.getSize(new THREE.Vector3());
-
-  // Add 1% padding so outline doesn't overlap mesh edges exactly
-  const dx = Math.max(size.x * 0.01, 0.002);
-  const dy = Math.max(size.y * 0.01, 0.002);
-  const dz = Math.max(size.z * 0.01, 0.002);
-
-  const x0 = min.x - dx, x1 = max.x + dx;
-  const y0 = min.y - dy, y1 = max.y + dy;
-  const z0 = min.z - dz, z1 = max.z + dz;
-
-  const vertices = [
-    // Bottom face
-    x0, y0, z0,  x1, y0, z0,
-    x1, y0, z0,  x1, y0, z1,
-    x1, y0, z1,  x0, y0, z1,
-    x0, y0, z1,  x0, y0, z0,
-    // Top face
-    x0, y1, z0,  x1, y1, z0,
-    x1, y1, z0,  x1, y1, z1,
-    x1, y1, z1,  x0, y1, z1,
-    x0, y1, z1,  x0, y1, z0,
-    // Vertical edges
-    x0, y0, z0,  x0, y1, z0,
-    x1, y0, z0,  x1, y1, z0,
-    x1, y0, z1,  x1, y1, z1,
-    x0, y0, z1,  x0, y1, z1,
-  ];
-
-  const geom = new LineGeometry();
-  geom.setPositions(vertices);
-
-  const line = new Line2(geom, r.outlineMaterial);
-  line.computeLineDistances(); // required for dashed lines
+  const line = new LineSegments2(segGeom, r.outlineMaterial);
+  line.computeLineDistances();
+  // Bind to the mesh's world matrix so it follows the mesh
+  line.matrixAutoUpdate = false;
+  line.matrix.copy(mesh.matrixWorld);
   line.renderOrder = 999;
   r.outlineGroup.add(line);
   r.outlineLines.set(uuid, line);
@@ -128,6 +100,14 @@ function updateOutlines(r: ViewportRefs) {
     const mesh = r.allMeshes.find((m) => m.uuid === uuid);
     if (mesh && !r.outlineLines.has(uuid)) {
       addOutline(uuid, mesh, r);
+    }
+  });
+  // Sync existing outline matrices to mesh transforms
+  r.outlineLines.forEach((line, uuid) => {
+    const mesh = r.allMeshes.find((m) => m.uuid === uuid);
+    if (mesh) {
+      mesh.updateMatrixWorld(true);
+      line.matrix.copy(mesh.matrixWorld);
     }
   });
 }
@@ -477,12 +457,16 @@ export function frameAll(r: ViewportRefs) {
   r.perspCamera.updateProjectionMatrix();
 
   if (r.orthoCamera) {
-    const aspect = r.perspCamera.aspect;
-    r.orthoCamera.left = -maxDim * aspect;
-    r.orthoCamera.right = maxDim * aspect;
-    r.orthoCamera.top = maxDim;
-    r.orthoCamera.bottom = -maxDim;
     r.orthoCamera.position.copy(r.perspCamera.position);
+    r.orthoCamera.quaternion.copy(r.perspCamera.quaternion);
+    const aspect = r.perspCamera.aspect;
+    const height = maxDim * 1.4;
+    r.orthoCamera.left = (-height * aspect) / 2;
+    r.orthoCamera.right = (height * aspect) / 2;
+    r.orthoCamera.top = height / 2;
+    r.orthoCamera.bottom = -height / 2;
+    r.orthoCamera.near = r.perspCamera.near;
+    r.orthoCamera.far = r.perspCamera.far;
     r.orthoCamera.updateProjectionMatrix();
   }
 
@@ -511,6 +495,20 @@ export function frameSelected(uuid: string, r: ViewportRefs) {
     center.y + cameraDistance * 0.5,
     center.z + cameraDistance * 0.8
   );
+  r.perspCamera.updateProjectionMatrix();
+
+  if (r.orthoCamera) {
+    r.orthoCamera.position.copy(r.perspCamera.position);
+    r.orthoCamera.quaternion.copy(r.perspCamera.quaternion);
+    const aspect = r.perspCamera.aspect;
+    const height = maxDim * 1.4;
+    r.orthoCamera.left = (-height * aspect) / 2;
+    r.orthoCamera.right = (height * aspect) / 2;
+    r.orthoCamera.top = height / 2;
+    r.orthoCamera.bottom = -height / 2;
+    r.orthoCamera.updateProjectionMatrix();
+  }
+
   r.controls.update();
 }
 

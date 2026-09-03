@@ -24,6 +24,32 @@ export default function ViewportInner({
 }) {
   const store = useGLBStore();
 
+  // Camera mode switch handler (perspective <-> ortho)
+  useEffect(() => {
+    const r = vpRefs.current;
+    if (!r.controls || !r.perspCamera || !r.orthoCamera) return;
+    const mode = store.cameraMode;
+    if (mode === "ortho") {
+      r.orthoCamera.position.copy(r.perspCamera.position);
+      r.orthoCamera.quaternion.copy(r.perspCamera.quaternion);
+      const d = r.perspCamera.position.distanceTo(r.controls.target);
+      const height = 2 * d * Math.tan(THREE.MathUtils.degToRad(r.perspCamera.fov / 2));
+      const aspect = r.perspCamera.aspect;
+      r.orthoCamera.left = (-height * aspect) / 2;
+      r.orthoCamera.right = (height * aspect) / 2;
+      r.orthoCamera.top = height / 2;
+      r.orthoCamera.bottom = -height / 2;
+      r.orthoCamera.updateProjectionMatrix();
+      r.controls.object = r.orthoCamera;
+    } else {
+      r.perspCamera.position.copy(r.orthoCamera.position);
+      r.perspCamera.quaternion.copy(r.orthoCamera.quaternion);
+      r.perspCamera.updateProjectionMatrix();
+      r.controls.object = r.perspCamera;
+    }
+    r.controls.update();
+  }, [store.cameraMode]);
+
   // Grid
   useEffect(() => {
     if (vpRefs.current.grid) vpRefs.current.grid.visible = store.showGrid;
@@ -84,7 +110,7 @@ export default function ViewportInner({
   const selCount = store.selectedUUIDs.size;
 
   return (
-    <div className="relative flex-1 overflow-hidden bg-[#141620]">
+    <div className="relative w-full h-full overflow-hidden bg-[#141620]">
       <canvas
         ref={canvasRef}
         className="block w-full h-full cursor-crosshair"
