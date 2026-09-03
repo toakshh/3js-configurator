@@ -3,7 +3,13 @@
 import { useEffect } from "react";
 import * as THREE from "three";
 import { useGLBStore } from "@/store/glbStore";
-import { ViewportRefs, frameAll, frameSelected, clearHighlight, applyHighlight } from "@/hooks/useViewport";
+import {
+  ViewportRefs,
+  frameAll,
+  frameSelected,
+  clearHighlight,
+  syncHighlightsToSelection,
+} from "@/hooks/useViewport";
 
 export default function ViewportInner({
   canvasRef,
@@ -18,12 +24,12 @@ export default function ViewportInner({
 }) {
   const store = useGLBStore();
 
-  // grid
+  // Grid
   useEffect(() => {
     if (vpRefs.current.grid) vpRefs.current.grid.visible = store.showGrid;
   }, [store.showGrid]);
 
-  // global wireframe
+  // Global wireframe
   useEffect(() => {
     vpRefs.current.allMeshes.forEach((mesh) => {
       const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
@@ -31,7 +37,7 @@ export default function ViewportInner({
     });
   }, [store.globalWireframe]);
 
-  // env mode
+  // Environment
   useEffect(() => {
     const r = vpRefs.current;
     if (!r.scene || !r.renderer) return;
@@ -55,27 +61,18 @@ export default function ViewportInner({
     }
   }, [store.envMode]);
 
-  // skybox
+  // Skybox
   useEffect(() => {
     const r = vpRefs.current;
     if (!r.scene) return;
     r.scene.background = store.skybox ? new THREE.Color(0x1a2a4a) : new THREE.Color(0x141620);
   }, [store.skybox]);
 
-  // selection highlight
+  // Sync highlights whenever selectedUUIDs changes
   useEffect(() => {
-    const r = vpRefs.current;
-    const newUUID = store.selectedUUID;
-    const oldUUID = r.selectedUUID;
-    if (oldUUID && oldUUID !== newUUID) clearHighlight(oldUUID, r);
-    if (newUUID) {
-      r.selectedUUID = newUUID;
-      const mesh = r.allMeshes.find((m) => m.uuid === newUUID);
-      if (mesh) applyHighlight(mesh, r);
-    } else {
-      r.selectedUUID = null;
-    }
-  }, [store.selectedUUID]);
+    syncHighlightsToSelection(store.selectedUUIDs, vpRefs.current);
+    vpRefs.current.selectedUUID = store.selectedUUID;
+  }, [store.selectedUUIDs, store.selectedUUID]);
 
   const envLabels: Record<string, string> = {
     studio: "Studio", outdoor: "Outdoor", dark: "Dark", none: "None",
@@ -84,12 +81,20 @@ export default function ViewportInner({
     studio: "outdoor", outdoor: "dark", dark: "none", none: "studio",
   };
 
+  const selCount = store.selectedUUIDs.size;
+
   return (
     <div className="relative flex-1 overflow-hidden bg-[#141620]">
       <canvas
         ref={canvasRef}
         className="block w-full h-full cursor-crosshair"
-        onClick={handleCanvasClick}
+        onClick={(e) => {
+          handleCanvasClick(e);
+          // After state update, sync highlights
+          setTimeout(() => {
+            syncHighlightsToSelection(useGLBStore.getState().selectedUUIDs, vpRefs.current);
+          }, 0);
+        }}
         onDragOver={(e) => e.preventDefault()}
         onDrop={(e) => {
           e.preventDefault();
@@ -139,10 +144,14 @@ export default function ViewportInner({
         </VpBtn>
       </div>
 
-      {/* Selected label */}
+      {/* Selection label */}
       {store.selectedUUID && (
-        <div className="absolute top-3 right-3 bg-black/60 border border-[#2e3250] rounded-md px-3 py-1.5 text-xs text-[#7c8bff] backdrop-blur pointer-events-none">
-          ●{" "}{store.meshEntries.find((e) => e.uuid === store.selectedUUID)?.name ?? "—"}
+        <div className="absolute top-3 right-3 bg-black/60 border border-[#2e3250] rounded-md px-3 py-1.5 text-xs text-[#7c8bff] backdrop-blur pointer-events-none flex items-center gap-2">
+          {selCount > 1 ? (
+            <span>{selCount} meshes selected</span>
+          ) : (
+            <span>● {store.meshEntries.find((e) => e.uuid === store.selectedUUID)?.name ?? "—"}</span>
+          )}
         </div>
       )}
 
@@ -153,15 +162,14 @@ export default function ViewportInner({
           Frame Selected
         </VpBtn>
         <VpBtn onClick={() => {
-          if (store.selectedUUID) { clearHighlight(store.selectedUUID, vpRefs.current); vpRefs.current.selectedUUID = null; }
-          store.selectMesh(null);
+          store.clearSelection();
         }}>Deselect</VpBtn>
       </div>
     </div>
   );
 }
 
-function VpBtn({ children, onClick, active }: { children: React.ReactNode; onClick?: () => void; active?: boolean; }) {
+function VpBtn({ children, onClick, active }: { children: React.ReactNode; onClick?: () => void; active?: boolean }) {
   return (
     <button
       onClick={onClick}

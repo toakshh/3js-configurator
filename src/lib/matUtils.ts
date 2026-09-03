@@ -30,7 +30,26 @@ export function snapshotMaterial(mat: THREE.Material): MaterialSnapshot {
     sheen: m.sheen ?? 0,
     sheenRoughness: m.sheenRoughness ?? 1,
     iridescence: m.iridescence ?? 0,
+    depthWrite: m.depthWrite !== false,
+    blending: m.blending ?? THREE.NormalBlending,
   };
+}
+
+export function applySnapshot(mat: THREE.MeshStandardMaterial, snap: MaterialSnapshot) {
+  if (mat.color) mat.color.set(snap.color);
+  mat.roughness = snap.roughness;
+  mat.metalness = snap.metalness;
+  if (mat.emissive) mat.emissive.set(snap.emissive);
+  mat.emissiveIntensity = snap.emissiveIntensity;
+  mat.opacity = snap.opacity;
+  mat.transparent = snap.transparent;
+  mat.wireframe = snap.wireframe;
+  mat.flatShading = snap.flatShading;
+  mat.side = snap.side;
+  mat.depthWrite = snap.depthWrite;
+  mat.blending = snap.blending;
+  if ("envMapIntensity" in mat) mat.envMapIntensity = snap.envMapIntensity;
+  mat.needsUpdate = true;
 }
 
 export function getMeshMat(mesh: THREE.Mesh): THREE.MeshStandardMaterial | null {
@@ -50,4 +69,21 @@ export function setAllMats(
     fn(m as THREE.MeshStandardMaterial);
     (m as THREE.Material).needsUpdate = true;
   });
+}
+
+/** Get a data-URL thumbnail of a Three.js Texture (128x128) */
+export function textureToDataURL(tex: THREE.Texture, size = 80): string | null {
+  try {
+    const img = tex.image as HTMLImageElement | HTMLCanvasElement | ImageBitmap | null;
+    if (!img) return null;
+    const canvas = document.createElement("canvas");
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    ctx.drawImage(img as CanvasImageSource, 0, 0, size, size);
+    return canvas.toDataURL("image/png");
+  } catch {
+    return null;
+  }
 }

@@ -4,14 +4,14 @@ import { useGLBStore, ActiveTab } from "@/store/glbStore";
 import MaterialTab from "./MaterialTab";
 import TransformTab from "./TransformTab";
 import InfoTab from "./InfoTab";
-import { ViewportRefs } from "@/hooks/useViewport";
+import { ViewportRefs, applyHistoryStep } from "@/hooks/useViewport";
 import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 
-const TABS: { id: ActiveTab; label: string }[] = [
-  { id: "material", label: "Material" },
-  { id: "transform", label: "Transform" },
-  { id: "info", label: "Info" },
+const TABS: { id: ActiveTab; label: string; icon: string }[] = [
+  { id: "material", label: "Material", icon: "🎨" },
+  { id: "transform", label: "Transform", icon: "⇲" },
+  { id: "info", label: "Info", icon: "ℹ" },
 ];
 
 export default function RightPanel({
@@ -21,27 +21,65 @@ export default function RightPanel({
 }) {
   const store = useGLBStore();
   const selectedEntry = store.meshEntries.find((e) => e.uuid === store.selectedUUID);
-  const [toast, setToast] = useState<string | null>(null);
+  const multiCount = store.selectedUUIDs.size;
+  const [toast, setToast] = useState<{ msg: string; type: "success" | "warn" } | null>(null);
 
-  const showToast = (msg: string) => {
-    setToast(msg);
-    setTimeout(() => setToast(null), 3000);
+  const canUndo = store.historyIndex > 0;
+  const canRedo = store.historyIndex < store.history.length - 1;
+
+  const showToast = (msg: string, type: "success" | "warn" = "success") => {
+    setToast({ msg, type });
+    setTimeout(() => setToast(null), 2800);
   };
+
+  const doUndo = useCallback(() => {
+    const step = store.undo();
+    if (!step) return;
+    applyHistoryStep(step, vpRefs.current);
+    store.setMeshEntries([...store.meshEntries]);
+  }, [store, vpRefs]);
+
+  const doRedo = useCallback(() => {
+    const step = store.redo();
+    if (!step) return;
+    applyHistoryStep(step, vpRefs.current);
+    store.setMeshEntries([...store.meshEntries]);
+  }, [store, vpRefs]);
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const active = document.activeElement;
+      // Don't fire inside inputs
+      if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.tagName === "SELECT")) return;
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        doUndo();
+      }
+      if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === "y" || (e.shiftKey && e.key.toLowerCase() === "z"))) {
+        e.preventDefault();
+        doRedo();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [doUndo, doRedo]);
 
   const exportGLB = () => {
     const root = vpRefs.current.gltfRoot;
     if (!root) { alert("Load a GLB first"); return; }
 
-    // temporarily clear highlight emissive so highlight orange doesn't bake into export
-    const uuid = store.selectedUUID;
-    if (uuid) {
+    // Temporarily restore emissive for selected meshes so highlight doesn't bake in
+    const restoreList: { uuid: string; emissive: number; emissiveIntensity: number }[] = [];
+    vpRefs.current.highlightMap.forEach((backup, uuid) => {
       const mesh = vpRefs.current.allMeshes.find((m) => m.uuid === uuid);
-      const backup = vpRefs.current.highlightMap.get(uuid);
-      if (mesh && backup) {
-        const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-        mats.forEach((m: any) => { if (m.emissive) { m.emissive.set(backup.emissive); m.emissiveIntensity = backup.emissiveIntensity; } });
-      }
-    }
+      if (!mesh) return;
+      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      mats.forEach((m: any) => {
+        if (m.emissive) { m.emissive.set(backup.emissive); m.emissiveIntensity = backup.emissiveIntensity; }
+      });
+      restoreList.push({ uuid, ...backup });
+    });
 
     const exporter = new GLTFExporter();
     exporter.parse(
@@ -55,14 +93,14 @@ export default function RightPanel({
         a.click();
         URL.revokeObjectURL(url);
 
-        // re-apply highlight
-        if (uuid) {
+        // Re-apply highlights
+        restoreList.forEach(({ uuid }) => {
           const mesh = vpRefs.current.allMeshes.find((m) => m.uuid === uuid);
-          if (mesh) {
-            const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-            mats.forEach((m: any) => { if (m.emissive) { m.emissive.set(0xff6b35); m.emissiveIntensity = 0.25; } });
-          }
-        }
+          if (!mesh) return;
+          const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+          mats.forEach((m: any) => { if (m.emissive) { m.emissive.set(0xff6b35); m.emissiveIntensity = 0.3; } });
+        });
+
         showToast("✓ Exported as configured.glb");
       },
       (err) => { console.error(err); alert("Export failed: " + err); },
@@ -91,65 +129,134 @@ export default function RightPanel({
         m.needsUpdate = true;
       });
     });
-    showToast("↺ All materials reset");
+    showToast("↺ All materials reset", "warn");
     store.setMeshEntries([...store.meshEntries]);
   };
 
   return (
-    <div className="w-[340px] min-w-[240px] bg-[#1a1d27] border-l border-[#2e3250] flex flex-col shrink-0 overflow-hidden">
-      {/* Header */}
-      <div className="px-4 py-3 border-b border-[#2e3250] bg-[#22263a] flex items-center gap-3 shrink-0">
-        <h2 className="text-[13px] font-semibold text-[#e8eaf6] flex-1 truncate">
-          {selectedEntry ? selectedEntry.name : "No mesh selected"}
-        </h2>
+    <div className="w-[400px] min-w-[320px] bg-[#0e1120] border-l border-[#1a1f38] flex flex-col shrink-0 overflow-hidden">
+
+      {/* ── Header ─────────────────────────────────────── */}
+      <div className="px-5 pt-4 pb-3 border-b border-[#1a1f38] bg-[#0c0f1e] shrink-0">
+        {/* Mesh name */}
+        <div className="flex items-start gap-3 mb-3">
+          <div className="w-8 h-8 rounded-lg bg-[#5b6ef5]/15 border border-[#5b6ef5]/25 flex items-center justify-center shrink-0 mt-0.5">
+            <span className="text-[14px]">⬡</span>
+          </div>
+          <div className="flex-1 min-w-0">
+            <h2 className="text-[13px] font-semibold text-[#c8cef0] truncate">
+              {selectedEntry
+                ? selectedEntry.name
+                : multiCount > 1
+                ? `${multiCount} meshes selected`
+                : "No mesh selected"}
+            </h2>
+            <p className="text-[10px] text-[#3a4270] mt-0.5">
+              {selectedEntry
+                ? `${selectedEntry.vertexCount.toLocaleString()} verts · ${selectedEntry.materialType}`
+                : multiCount > 1
+                ? "Changes apply to all selected"
+                : "Select a mesh to begin editing"}
+            </p>
+          </div>
+        </div>
+
         {/* Tabs */}
-        <div className="flex gap-0.5 bg-[#141620] rounded-md p-0.5 shrink-0">
+        <div className="flex gap-1 bg-[#080a18] rounded-xl p-1">
           {TABS.map((t) => (
             <button
               key={t.id}
               onClick={() => store.setActiveTab(t.id)}
-              className={`px-2.5 py-1 rounded text-[11px] transition-colors whitespace-nowrap
+              className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-[11px] font-medium transition-all
                 ${store.activeTab === t.id
-                  ? "bg-[#5b6ef5] text-white"
-                  : "text-[#778] hover:text-[#ccd]"
+                  ? "bg-[#5b6ef5] text-white shadow-lg shadow-[#5b6ef5]/25"
+                  : "text-[#3a4270] hover:text-[#7880a8]"
                 }`}
             >
+              <span className="text-[12px]">{t.icon}</span>
               {t.label}
             </button>
           ))}
         </div>
       </div>
 
-      {/* Tab body */}
-      <div className="flex-1 overflow-y-auto scrollbar-thin">
-        {store.activeTab === "material" && <MaterialTab vpRefs={vpRefs} />}
-        {store.activeTab === "transform" && <TransformTab vpRefs={vpRefs} />}
-        {store.activeTab === "info" && <InfoTab vpRefs={vpRefs} />}
+      {/* ── Undo / Redo bar ────────────────────────────── */}
+      <div className="flex items-center gap-2 px-5 py-2 border-b border-[#1a1f38] bg-[#0a0d1c] shrink-0">
+        <button
+          onClick={doUndo}
+          disabled={!canUndo}
+          title="Undo (Ctrl+Z)"
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium border transition-all
+            ${canUndo
+              ? "bg-[#12152a] border-[#1e2440] text-[#7880a8] hover:border-[#5b6ef5] hover:text-[#a0a8ff]"
+              : "bg-[#0a0d1c] border-[#13162a] text-[#2a3050] cursor-not-allowed"
+            }`}
+        >
+          <svg width={12} height={12} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}>
+            <path d="M3 7v6h6M3 13C5 7.5 10 4 16 4a9 9 0 010 18c-4 0-7.5-1.5-9.5-4" />
+          </svg>
+          Undo
+        </button>
+        <button
+          onClick={doRedo}
+          disabled={!canRedo}
+          title="Redo (Ctrl+Y)"
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium border transition-all
+            ${canRedo
+              ? "bg-[#12152a] border-[#1e2440] text-[#7880a8] hover:border-[#5b6ef5] hover:text-[#a0a8ff]"
+              : "bg-[#0a0d1c] border-[#13162a] text-[#2a3050] cursor-not-allowed"
+            }`}
+        >
+          <svg width={12} height={12} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}>
+            <path d="M21 7v6h-6M21 13C19 7.5 14 4 8 4a9 9 0 000 18c4 0 7.5-1.5 9.5-4" />
+          </svg>
+          Redo
+        </button>
+        <div className="flex-1" />
+        <span className="text-[9px] text-[#1e2440] font-mono">
+          {store.historyIndex + 1}/{store.history.length}
+        </span>
       </div>
 
-      {/* Export bar */}
-      <div className="px-3 py-3 border-t border-[#2e3250] space-y-2 shrink-0">
+      {/* ── Tab content ────────────────────────────────── */}
+      <div className="flex-1 overflow-y-auto scrollbar-thin">
+        <div className={store.activeTab === "material" ? "block" : "hidden"}>
+          <MaterialTab vpRefs={vpRefs} />
+        </div>
+        <div className={store.activeTab === "transform" ? "block" : "hidden"}>
+          <TransformTab vpRefs={vpRefs} />
+        </div>
+        <div className={store.activeTab === "info" ? "block" : "hidden"}>
+          <InfoTab vpRefs={vpRefs} />
+        </div>
+      </div>
+
+      {/* ── Export / Reset bar ─────────────────────────── */}
+      <div className="px-4 py-4 border-t border-[#1a1f38] bg-[#0c0f1e] space-y-2 shrink-0">
         <button
           onClick={exportGLB}
-          className="w-full bg-[#5b6ef5] hover:bg-[#7c8bff] text-white font-semibold py-2.5 rounded-lg text-[13px] transition-colors flex items-center justify-center gap-2"
+          className="w-full bg-gradient-to-r from-[#5b6ef5] to-[#7c5bf5] hover:from-[#6b7eff] hover:to-[#8c6bff] text-white font-semibold py-3 rounded-xl text-[13px] transition-all shadow-lg shadow-[#5b6ef5]/20 flex items-center justify-center gap-2.5"
         >
-          <svg width={15} height={15} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+          <svg width={15} height={15} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}>
             <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3" />
           </svg>
           Export Modified .glb
         </button>
         <button
           onClick={resetAll}
-          className="w-full bg-[#1e2235] border border-[#2e3250] hover:border-[#5b6ef5] text-[#ccd] py-2 rounded-lg text-[12px] transition-colors"
+          className="w-full bg-[#12152a] border border-[#1e2440] hover:border-[#5b6ef5]/50 text-[#4a5280] hover:text-[#7880a8] py-2 rounded-xl text-[12px] transition-all"
         >
-          ↺ Reset All Materials
+          ↺ Reset All Materials to Original
         </button>
       </div>
 
-      {/* Toast */}
+      {/* ── Toast ──────────────────────────────────────── */}
       {toast && (
-        <div className="fixed bottom-5 left-1/2 -translate-x-1/2 bg-[#4caf90] text-white text-[12px] font-semibold px-5 py-2 rounded-full shadow-lg z-50 animate-bounce">
-          {toast}
+        <div
+          className={`fixed bottom-6 left-1/2 -translate-x-1/2 text-white text-[12px] font-semibold px-5 py-2.5 rounded-full shadow-xl z-50 transition-all
+            ${toast.type === "success" ? "bg-[#4caf90]" : "bg-[#f5a623]"}`}
+        >
+          {toast.msg}
         </div>
       )}
     </div>

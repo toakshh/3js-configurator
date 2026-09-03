@@ -2,70 +2,88 @@
 @tailwind components;
 @tailwind utilities;
 
-* {
-  box-sizing: border-box;
-}
+* { margin:0;
+    box-sizing: border-box; 
+    padding: 0;
+  }
 
-html,
-body {
+
+html, body {
   height: 100%;
   overflow: hidden;
+  background: #0e1120;
 }
 
-/* Scrollbar */
+/* ── Scrollbar ─────────────────────────────── */
 .scrollbar-thin {
   scrollbar-width: thin;
-  scrollbar-color: #2e3250 transparent;
+  scrollbar-color: #1e2440 transparent;
 }
-.scrollbar-thin::-webkit-scrollbar {
-  width: 5px;
-}
+.scrollbar-thin::-webkit-scrollbar { width: 4px; }
 .scrollbar-thin::-webkit-scrollbar-thumb {
-  background: #2e3250;
-  border-radius: 3px;
+  background: #1e2440;
+  border-radius: 2px;
 }
+.scrollbar-thin::-webkit-scrollbar-thumb:hover { background: #2e3660; }
 
-/* Range input */
+/* ── Range input ──────────────────────────── */
 input[type="range"] {
   -webkit-appearance: none;
   appearance: none;
-  height: 4px;
+  height: 3px;
   border-radius: 2px;
-  background: #22263a;
+  background: #1e2440;
   outline: none;
 }
 input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none;
-  width: 14px;
-  height: 14px;
+  width: 13px;
+  height: 13px;
   border-radius: 50%;
   background: #5b6ef5;
   cursor: pointer;
-  transition: transform 0.1s;
+  box-shadow: 0 0 6px #5b6ef555;
+  transition: transform 0.1s, box-shadow 0.1s;
 }
 input[type="range"]::-webkit-slider-thumb:hover {
-  transform: scale(1.2);
+  transform: scale(1.25);
+  box-shadow: 0 0 10px #5b6ef588;
+}
+input[type="range"]::-moz-range-thumb {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: #5b6ef5;
+  cursor: pointer;
+  border: none;
 }
 
-/* Color input */
+/* ── Color input ─────────────────────────── */
 input[type="color"] {
   -webkit-appearance: none;
   appearance: none;
   border: none;
-  padding: 2px;
-  cursor: pointer;
-}
-input[type="color"]::-webkit-color-swatch-wrapper {
   padding: 0;
-  border-radius: 4px;
-}
-input[type="color"]::-webkit-color-swatch {
-  border: none;
-  border-radius: 4px;
+  cursor: pointer;
+  width: 0;
+  height: 0;
+  opacity: 0;
+  position: absolute;
 }
 
-/* Number input arrows hidden */
+/* ── Number input ────────────────────────── */
 input[type="number"]::-webkit-inner-spin-button,
 input[type="number"]::-webkit-outer-spin-button {
   -webkit-appearance: none;
 }
+input[type="number"] { -moz-appearance: textfield; }
+
+/* ── Select ──────────────────────────────── */
+select { -webkit-appearance: none; appearance: none; }
+
+/* ── Smooth section reveal ────────────────── */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.tab-content { animation: fadeIn 0.15s ease; }
