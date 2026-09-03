@@ -36,16 +36,16 @@ export interface ViewportRefs {
 
 function createOutlineMaterial(): LineMaterial {
   return new LineMaterial({
-    color: 0x7c8bff,
-    linewidth: 2,
+    color: 0xffffff,
+    linewidth: 1, // extremely thin
     dashed: true,
     dashScale: 1,
-    dashSize: 0.08,
-    gapSize: 0.06,
+    dashSize: 0.1,
+    gapSize: 0.1,
     dashOffset: 0,
     transparent: true,
-    opacity: 0.95,
-    depthTest: false, // always draw on top of mesh
+    opacity: 0.35, // very faint
+    depthTest: true, // respects depth so it doesn't draw over the front of the geometry!
     resolution: new THREE.Vector2(
       typeof window !== "undefined" ? window.innerWidth : 1920,
       typeof window !== "undefined" ? window.innerHeight : 1080
@@ -57,18 +57,48 @@ function addOutline(uuid: string, mesh: THREE.Mesh, r: ViewportRefs) {
   if (r.outlineLines.has(uuid)) return;
 
   mesh.updateMatrixWorld(true);
-  // Extract edges from the mesh geometry (like Photoshop marching-ants)
-  const edges = new THREE.EdgesGeometry(mesh.geometry, 15); // 15° threshold
-  // Convert to LineSegmentsGeometry positions
+  const box = new THREE.Box3().setFromObject(mesh);
+  if (box.isEmpty()) return;
+
+  const min = box.min;
+  const max = box.max;
+  const size = box.getSize(new THREE.Vector3());
+
+  // Add 2% padding so the box sits clearly outside the mesh and doesn't intersect
+  const dx = Math.max(size.x * 0.02, 0.01);
+  const dy = Math.max(size.y * 0.02, 0.01);
+  const dz = Math.max(size.z * 0.02, 0.01);
+
+  const x0 = min.x - dx, x1 = max.x + dx;
+  const y0 = min.y - dy, y1 = max.y + dy;
+  const z0 = min.z - dz, z1 = max.z + dz;
+
+  const vertices = [
+    // Bottom face
+    x0, y0, z0,  x1, y0, z0,
+    x1, y0, z0,  x1, y0, z1,
+    x1, y0, z1,  x0, y0, z1,
+    x0, y0, z1,  x0, y0, z0,
+    // Top face
+    x0, y1, z0,  x1, y1, z0,
+    x1, y1, z0,  x1, y1, z1,
+    x1, y1, z1,  x0, y1, z1,
+    x0, y1, z1,  x0, y1, z0,
+    // Vertical edges
+    x0, y0, z0,  x0, y1, z0,
+    x1, y0, z0,  x1, y1, z0,
+    x1, y0, z1,  x1, y1, z1,
+    x0, y0, z1,  x0, y1, z1,
+  ];
+
   const segGeom = new LineSegmentsGeometry();
-  segGeom.setPositions(edges.attributes.position.array as Float32Array);
+  segGeom.setPositions(vertices);
 
   const line = new LineSegments2(segGeom, r.outlineMaterial);
   line.computeLineDistances();
-  // Bind to the mesh's world matrix so it follows the mesh
+  // Bounding box is already in world space
   line.matrixAutoUpdate = false;
-  line.matrix.copy(mesh.matrixWorld);
-  line.renderOrder = 999;
+  line.matrix.identity(); 
   r.outlineGroup.add(line);
   r.outlineLines.set(uuid, line);
 }
@@ -372,62 +402,25 @@ export function useViewport(canvasRef: React.RefObject<HTMLCanvasElement | null>
 
 // ─── Standalone Viewport Helpers ──────────────────────────────────────────
 
-export function applyHighlight(mesh: THREE.Mesh, r: ViewportRefs) {
-  const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-  const first = mats[0] as THREE.MeshStandardMaterial;
-  if (!r.highlightMap.has(mesh.uuid)) {
-    r.highlightMap.set(mesh.uuid, {
-      emissive: first?.emissive?.getHex() ?? 0,
-      emissiveIntensity: first?.emissiveIntensity ?? 1,
-    });
-  }
-  mats.forEach((m) => {
-    const sm = m as THREE.MeshStandardMaterial;
-    if (sm.emissive) {
-      sm.emissive.set(0xff6b35);
-      sm.emissiveIntensity = 0.3;
-    }
-  });
+export function applyHighlight(_mesh: THREE.Mesh, _r: ViewportRefs) {
+  // Selection is handled strictly via 3D animated line outlines.
+  // We do NOT modify material emissive/color so the user gets 100% true-to-life material preview.
 }
 
-export function clearHighlight(uuid: string, r: ViewportRefs) {
-  const backup = r.highlightMap.get(uuid);
-  if (!backup) return;
-  const mesh = r.allMeshes.find((m) => m.uuid === uuid);
-  if (mesh) {
-    const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-    mats.forEach((m) => {
-      const sm = m as THREE.MeshStandardMaterial;
-      if (sm.emissive) {
-        sm.emissive.set(backup.emissive);
-        sm.emissiveIntensity = backup.emissiveIntensity;
-      }
-    });
-  }
-  r.highlightMap.delete(uuid);
+export function clearHighlight(_uuid: string, _r: ViewportRefs) {
+  // No-op
 }
 
-export function clearAllHighlights(r: ViewportRefs) {
-  const uuids = [...r.highlightMap.keys()];
-  uuids.forEach((uuid) => clearHighlight(uuid, r));
+export function clearAllHighlights(_r: ViewportRefs) {
+  // No-op
 }
 
 export function selectMeshByUUID(uuid: string, r: ViewportRefs) {
-  clearAllHighlights(r);
   r.selectedUUID = uuid;
-  const mesh = r.allMeshes.find((m) => m.uuid === uuid);
-  if (mesh) applyHighlight(mesh, r);
 }
 
-export function syncHighlightsToSelection(uuids: Set<string>, r: ViewportRefs) {
-  const toRemove = [...r.highlightMap.keys()].filter((id) => !uuids.has(id));
-  toRemove.forEach((id) => clearHighlight(id, r));
-  uuids.forEach((uuid) => {
-    if (!r.highlightMap.has(uuid)) {
-      const mesh = r.allMeshes.find((m) => m.uuid === uuid);
-      if (mesh) applyHighlight(mesh, r);
-    }
-  });
+export function syncHighlightsToSelection(_uuids: Set<string>, _r: ViewportRefs) {
+  // No-op - selection outlines are synced automatically via updateOutlines
 }
 
 export function frameAll(r: ViewportRefs) {

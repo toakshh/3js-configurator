@@ -6,8 +6,6 @@ import {
   useViewport,
   frameAll,
   frameSelected,
-  clearHighlight,
-  applyHighlight,
   selectMeshByUUID,
 } from "@/hooks/useViewport";
 import * as THREE from "three";
@@ -79,19 +77,9 @@ export default function Viewport() {
     }
   }, [store.cameraMode, refs]);
 
-  // Sync selection highlight whenever selectedUUID changes
+  // Sync selectedUUID in refs (highlights are handled via line outlines)
   useEffect(() => {
-    const r = refs.current;
-    const newUUID = store.selectedUUID;
-    const oldUUID = r.selectedUUID;
-    if (oldUUID && oldUUID !== newUUID) clearHighlight(oldUUID, r);
-    if (newUUID) {
-      r.selectedUUID = newUUID;
-      const mesh = r.allMeshes.find((m) => m.uuid === newUUID);
-      if (mesh) applyHighlight(mesh, r);
-    } else {
-      r.selectedUUID = null;
-    }
+    refs.current.selectedUUID = store.selectedUUID;
   }, [store.selectedUUID, refs]);
 
   // Drag-drop on canvas
@@ -210,10 +198,6 @@ export default function Viewport() {
         </VpBtn>
         <VpBtn
           onClick={() => {
-            if (store.selectedUUID) {
-              clearHighlight(store.selectedUUID, refs.current);
-              refs.current.selectedUUID = null;
-            }
             store.selectMesh(null);
           }}
         >

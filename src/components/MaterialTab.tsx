@@ -3,7 +3,7 @@
 import * as THREE from "three";
 import { useGLBStore } from "@/store/glbStore";
 import { getMeshMat, setAllMats, colorToHex, snapshotMaterial, textureToDataURL, applySnapshot } from "@/lib/matUtils";
-import { ViewportRefs, applyHighlight, clearHighlight } from "@/hooks/useViewport";
+import { ViewportRefs } from "@/hooks/useViewport";
 import { useCallback } from "react";
 
 // ─── Design tokens ────────────────────────────────────────────────────────
@@ -389,8 +389,6 @@ export default function MaterialTab({
       });
       mesh.material = newMat;
       store.setSnapshot(id, snapshotMaterial(newMat));
-      clearHighlight(id, vpRefs.current);
-      applyHighlight(mesh, vpRefs.current);
     });
     refresh();
   };

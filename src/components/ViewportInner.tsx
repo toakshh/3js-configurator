@@ -7,8 +7,6 @@ import {
   ViewportRefs,
   frameAll,
   frameSelected,
-  clearHighlight,
-  syncHighlightsToSelection,
 } from "@/hooks/useViewport";
 
 export default function ViewportInner({
@@ -96,7 +94,6 @@ export default function ViewportInner({
 
   // Sync highlights whenever selectedUUIDs changes
   useEffect(() => {
-    syncHighlightsToSelection(store.selectedUUIDs, vpRefs.current);
     vpRefs.current.selectedUUID = store.selectedUUID;
   }, [store.selectedUUIDs, store.selectedUUID]);
 
@@ -116,10 +113,6 @@ export default function ViewportInner({
         className="block w-full h-full cursor-crosshair"
         onClick={(e) => {
           handleCanvasClick(e);
-          // After state update, sync highlights
-          setTimeout(() => {
-            syncHighlightsToSelection(useGLBStore.getState().selectedUUIDs, vpRefs.current);
-          }, 0);
         }}
         onDragOver={(e) => e.preventDefault()}
         onDrop={(e) => {

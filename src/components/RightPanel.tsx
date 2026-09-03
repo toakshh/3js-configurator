@@ -70,18 +70,6 @@ export default function RightPanel({
 
     const loadingToast = toast.loading("Exporting GLB...");
 
-    // Temporarily restore emissive for selected meshes so highlight doesn't bake in
-    const restoreList: { uuid: string; emissive: number; emissiveIntensity: number }[] = [];
-    vpRefs.current.highlightMap.forEach((backup, uuid) => {
-      const mesh = vpRefs.current.allMeshes.find((m) => m.uuid === uuid);
-      if (!mesh) return;
-      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-      mats.forEach((m: any) => {
-        if (m.emissive) { m.emissive.set(backup.emissive); m.emissiveIntensity = backup.emissiveIntensity; }
-      });
-      restoreList.push({ uuid, ...backup });
-    });
-
     const exporter = new GLTFExporter();
     exporter.parse(
       root,
@@ -93,14 +81,6 @@ export default function RightPanel({
         a.download = "configured.glb";
         a.click();
         URL.revokeObjectURL(url);
-
-        // Re-apply highlights
-        restoreList.forEach(({ uuid }) => {
-          const mesh = vpRefs.current.allMeshes.find((m) => m.uuid === uuid);
-          if (!mesh) return;
-          const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-          mats.forEach((m: any) => { if (m.emissive) { m.emissive.set(0xff6b35); m.emissiveIntensity = 0.3; } });
-        });
 
         toast.success("Exported as configured.glb", { id: loadingToast });
       },

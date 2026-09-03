@@ -2,7 +2,6 @@
 
 import * as THREE from "three";
 import { useGLBStore } from "@/store/glbStore";
-import { syncHighlightsToSelection } from "@/hooks/useViewport";
 import { ViewportRefs } from "@/hooks/useViewport";
 import { toast } from "react-hot-toast";
 import { Trash2, Eye, EyeOff, Box } from "lucide-react";
@@ -22,9 +21,6 @@ export default function MeshList({ vpRefs }: { vpRefs: React.MutableRefObject<Vi
     } else {
       store.selectMesh(uuid);
     }
-    setTimeout(() => {
-      syncHighlightsToSelection(useGLBStore.getState().selectedUUIDs, vpRefs.current);
-    }, 0);
   };
 
   const toggleVis = (uuid: string, current: boolean, e: React.MouseEvent) => {
