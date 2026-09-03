@@ -3,7 +3,7 @@
 import * as THREE from "three";
 import { useGLBStore } from "@/store/glbStore";
 import { getMeshMat } from "@/lib/matUtils";
-import { ViewportRefs } from "@/hooks/useViewport";
+import { ViewportRefs, getMesh } from "@/hooks/useViewport";
 
 function InfoCell({ label, value }: { label: string; value: string | number }) {
   return (
@@ -23,12 +23,12 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
 }
 
 export default function InfoTab({ vpRefs }: { vpRefs: React.MutableRefObject<ViewportRefs> }) {
-  const store = useGLBStore();
-  const uuid = store.selectedUUID;
-  const entry = store.meshEntries.find((e) => e.uuid === uuid);
-  const mesh = uuid ? vpRefs.current.allMeshes.find((m) => m.uuid === uuid) : null;
-  const forceUpdate = store.setMeshEntries;
-  const refresh = () => forceUpdate([...store.meshEntries]);
+  const uuid = useGLBStore((s) => s.selectedUUID);
+  const entry = useGLBStore((s) => s.meshEntries.find((e) => e.uuid === s.selectedUUID));
+  // Everything below reads live Three.js state, so re-render on revision bumps.
+  useGLBStore((s) => s.revision);
+  const refresh = useGLBStore((s) => s.bumpRevision);
+  const mesh = uuid ? getMesh(vpRefs.current, uuid) : null;
 
   if (!mesh || !entry) {
     return (

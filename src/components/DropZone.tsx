@@ -2,18 +2,14 @@
 
 import { useRef } from "react";
 import { useGLBStore } from "@/store/glbStore";
-import { useViewport } from "@/hooks/useViewport";
-import { selectMeshByUUID } from "@/hooks/useViewport";
 
-// We need to access the viewport refs from the parent — pass them via a simple singleton ref store
-// Instead, we re-export a simple drop handler that the MeshList can trigger
 export default function DropZone({
   loadGLB,
 }: {
   loadGLB: (f: File) => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
-  const store = useGLBStore();
+  const meshCount = useGLBStore((s) => s.meshEntries.length);
 
   return (
     <div
@@ -52,9 +48,9 @@ export default function DropZone({
         <span className="text-[#7c8bff] font-semibold">Drop .glb</span> or{" "}
         <span className="text-[#7c8bff] font-semibold">click to browse</span>
       </p>
-      {store.meshEntries.length > 0 && (
+      {meshCount > 0 && (
         <p className="text-[10px] text-[#556] mt-1">
-          {store.meshEntries.length} mesh{store.meshEntries.length !== 1 ? "es" : ""} loaded
+          {meshCount} mesh{meshCount !== 1 ? "es" : ""} loaded
         </p>
       )}
     </div>

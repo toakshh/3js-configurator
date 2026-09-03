@@ -4,10 +4,18 @@ import { useGLBStore, ActiveTab } from "@/store/glbStore";
 import MaterialTab from "./MaterialTab";
 import TransformTab from "./TransformTab";
 import InfoTab from "./InfoTab";
-import { ViewportRefs, applyHistoryStep } from "@/hooks/useViewport";
+import {
+  ViewportRefs,
+  applyHistoryStep,
+  snapshotMeshes,
+  getMesh,
+  invalidate,
+} from "@/hooks/useViewport";
+import { applySnapshot } from "@/lib/matUtils";
 import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
 import { useEffect, useCallback } from "react";
 import { toast } from "react-hot-toast";
+import * as THREE from "three";
 
 const TABS: { id: ActiveTab; label: string; icon: string }[] = [
   { id: "material", label: "Material", icon: "🎨" },
@@ -24,26 +32,44 @@ export default function RightPanel({
   collapsed: boolean;
   onToggle: () => void;
 }) {
-  const store = useGLBStore();
-  const selectedEntry = store.meshEntries.find((e) => e.uuid === store.selectedUUID);
-  const multiCount = store.selectedUUIDs.size;
+  const activeTab = useGLBStore((s) => s.activeTab);
+  const setActiveTab = useGLBStore((s) => s.setActiveTab);
+  const multiCount = useGLBStore((s) => s.selectedUUIDs.size);
+  const selectedEntry = useGLBStore((s) =>
+    s.meshEntries.find((e) => e.uuid === s.selectedUUID)
+  );
+  const historyIndex = useGLBStore((s) => s.historyIndex);
+  const historyLength = useGLBStore((s) => s.history.length);
 
-  const canUndo = store.historyIndex > 0;
-  const canRedo = store.historyIndex < store.history.length - 1;
+  const canUndo = historyIndex > 0;
+  const canRedo = historyIndex < historyLength - 1;
 
   const doUndo = useCallback(() => {
-    const step = store.undo();
+    const store = useGLBStore.getState();
+    if (store.historyIndex <= 0) return;
+    if (store.historyIndex === store.history.length - 1) {
+      // History entries record the state *before* each edit, so the live scene
+      // is not in the stack yet. Capture it first, otherwise redo can never
+      // bring back the most recent change.
+      store.pushHistoryImmediate(
+        snapshotMeshes(
+          store.meshEntries.map((e) => e.uuid),
+          vpRefs.current
+        )
+      );
+    }
+    const step = useGLBStore.getState().undo();
     if (!step) return;
     applyHistoryStep(step, vpRefs.current);
-    store.setMeshEntries([...store.meshEntries]);
-  }, [store, vpRefs]);
+    useGLBStore.getState().bumpRevision();
+  }, [vpRefs]);
 
   const doRedo = useCallback(() => {
-    const step = store.redo();
+    const step = useGLBStore.getState().redo();
     if (!step) return;
     applyHistoryStep(step, vpRefs.current);
-    store.setMeshEntries([...store.meshEntries]);
-  }, [store, vpRefs]);
+    useGLBStore.getState().bumpRevision();
+  }, [vpRefs]);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -84,8 +110,8 @@ export default function RightPanel({
 
         toast.success("Exported as configured.glb", { id: loadingToast });
       },
-      (err) => { 
-        console.error(err); 
+      (err) => {
+        console.error(err);
         toast.error("Export failed: " + err, { id: loadingToast });
       },
       { binary: true }
@@ -94,30 +120,17 @@ export default function RightPanel({
 
   const resetAll = () => {
     if (!confirm("Reset ALL meshes to their original loaded material state?")) return;
+    const store = useGLBStore.getState();
     store.meshEntries.forEach((entry) => {
-      const mesh = vpRefs.current.allMeshes.find((m) => m.uuid === entry.uuid);
+      const mesh = getMesh(vpRefs.current, entry.uuid);
       const snap = store.snapshots.get(entry.uuid);
       if (!mesh || !snap) return;
       const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-      mats.forEach((m: any) => {
-        if (m.color) m.color.set(snap.color);
-        m.roughness = snap.roughness;
-        m.metalness = snap.metalness;
-        if (m.emissive) m.emissive.set(snap.emissive);
-        m.emissiveIntensity = snap.emissiveIntensity;
-        m.opacity = snap.opacity;
-        m.transparent = snap.transparent;
-        m.wireframe = snap.wireframe;
-        m.flatShading = snap.flatShading;
-        m.side = snap.side;
-        m.depthWrite = snap.depthWrite;
-        m.blending = snap.blending;
-        if ("envMapIntensity" in m) m.envMapIntensity = snap.envMapIntensity;
-        m.needsUpdate = true;
-      });
+      mats.forEach((m) => applySnapshot(m as THREE.MeshStandardMaterial, snap));
     });
+    invalidate();
     toast("All materials reset to original", { icon: "↺" });
-    store.setMeshEntries([...store.meshEntries]);
+    store.bumpRevision();
   };
 
   return (
@@ -157,7 +170,7 @@ export default function RightPanel({
                   ? `${multiCount} meshes selected`
                   : "No mesh selected"}
               </h2>
-              <p className="text-[10px] text-[#3a4270] mt-0.5 mt-1">
+              <p className="text-[10px] text-[#3a4270] mt-1">
                 {selectedEntry
                   ? `${selectedEntry.vertexCount.toLocaleString()} verts · ${selectedEntry.materialType}`
                   : multiCount > 1
@@ -172,9 +185,9 @@ export default function RightPanel({
             {TABS.map((t) => (
               <button
                 key={t.id}
-                onClick={() => store.setActiveTab(t.id)}
+                onClick={() => setActiveTab(t.id)}
                 className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-[11px] font-medium transition-all
-                  ${store.activeTab === t.id
+                  ${activeTab === t.id
                     ? "bg-[#5b6ef5] text-white shadow-lg shadow-[#5b6ef5]/25"
                     : "text-[#3a4270] hover:text-[#7880a8]"
                   }`}
@@ -220,19 +233,19 @@ export default function RightPanel({
           </button>
           <div className="flex-1" />
           <span className="text-[9px] text-[#1e2440] font-mono">
-            {store.history.length > 0 ? `${store.historyIndex + 1}/${store.history.length}` : "0/0"}
+            {historyLength > 0 ? `${historyIndex + 1}/${historyLength}` : "0/0"}
           </span>
         </div>
 
         {/* ── Tab content ────────────────────────────────── */}
         <div className="flex-1 overflow-y-auto scrollbar-thin">
-          <div className={store.activeTab === "material" ? "block" : "hidden"}>
+          <div className={activeTab === "material" ? "block" : "hidden"}>
             <MaterialTab vpRefs={vpRefs} />
           </div>
-          <div className={store.activeTab === "transform" ? "block" : "hidden"}>
+          <div className={activeTab === "transform" ? "block" : "hidden"}>
             <TransformTab vpRefs={vpRefs} />
           </div>
-          <div className={store.activeTab === "info" ? "block" : "hidden"}>
+          <div className={activeTab === "info" ? "block" : "hidden"}>
             <InfoTab vpRefs={vpRefs} />
           </div>
         </div>

@@ -8,8 +8,11 @@ import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment
 import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
 import { LineSegmentsGeometry } from "three/examples/jsm/lines/LineSegmentsGeometry.js";
 import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
-import { useGLBStore, MeshEntry, HistoryStep } from "@/store/glbStore";
+import { useGLBStore, MeshEntry, HistoryStep, MaterialSnapshot } from "@/store/glbStore";
 import { snapshotMaterial, applySnapshot } from "@/lib/matUtils";
+import { invalidate, setRenderRequester } from "@/lib/renderScheduler";
+
+export { invalidate } from "@/lib/renderScheduler";
 
 // ─── Types ───────────────────────────────────────────────────────────────
 
@@ -23,13 +26,43 @@ export interface ViewportRefs {
   roomEnvTex: THREE.Texture | null;
   gltfRoot: THREE.Group | null;
   allMeshes: THREE.Mesh[];
-  highlightMap: Map<string, { emissive: number; emissiveIntensity: number }>;
+  /** uuid → mesh, so hot paths look up in O(1) instead of scanning allMeshes. */
+  meshMap: Map<string, THREE.Mesh>;
   selectedUUID: string | null;
 
   // Selection outline system (added directly to main scene)
   outlineGroup: THREE.Group;
   outlineLines: Map<string, LineSegments2>;
   outlineMaterial: LineMaterial;
+}
+
+/** O(1) mesh lookup by uuid. */
+export function getMesh(r: ViewportRefs, uuid: string): THREE.Mesh | null {
+  return r.meshMap.get(uuid) ?? null;
+}
+
+// ─── Disposal ─────────────────────────────────────────────────────────────
+
+function disposeMaterial(mat: THREE.Material) {
+  // Textures hang off the material as plain properties; dispose whatever we
+  // find so GPU memory is released along with the material itself.
+  for (const value of Object.values(mat)) {
+    if (value && (value as THREE.Texture).isTexture) {
+      (value as THREE.Texture).dispose();
+    }
+  }
+  mat.dispose();
+}
+
+/** Release every GPU resource held by a subtree (geometries, materials, textures). */
+export function disposeObject3D(root: THREE.Object3D) {
+  root.traverse((obj) => {
+    const mesh = obj as THREE.Mesh;
+    if (mesh.geometry) mesh.geometry.dispose();
+    if (!mesh.material) return;
+    const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    mats.forEach(disposeMaterial);
+  });
 }
 
 // ─── Outline helpers ──────────────────────────────────────────────────────
@@ -45,7 +78,7 @@ function createOutlineMaterial(): LineMaterial {
     dashOffset: 0,
     transparent: true,
     opacity: 0.35, // very faint
-    depthTest: true, // respects depth so it doesn't draw over the front of the geometry!
+    depthTest: true, // respects depth so it does not draw over the front of the geometry
     resolution: new THREE.Vector2(
       typeof window !== "undefined" ? window.innerWidth : 1920,
       typeof window !== "undefined" ? window.innerHeight : 1080
@@ -98,7 +131,7 @@ function addOutline(uuid: string, mesh: THREE.Mesh, r: ViewportRefs) {
   line.computeLineDistances();
   // Bounding box is already in world space
   line.matrixAutoUpdate = false;
-  line.matrix.identity(); 
+  line.matrix.identity();
   r.outlineGroup.add(line);
   r.outlineLines.set(uuid, line);
 }
@@ -127,19 +160,20 @@ function updateOutlines(r: ViewportRefs) {
   });
   // Add newly selected
   selected.forEach((uuid) => {
-    const mesh = r.allMeshes.find((m) => m.uuid === uuid);
+    const mesh = getMesh(r, uuid);
     if (mesh && !r.outlineLines.has(uuid)) {
       addOutline(uuid, mesh, r);
     }
   });
   // Sync existing outline matrices to mesh transforms
   r.outlineLines.forEach((line, uuid) => {
-    const mesh = r.allMeshes.find((m) => m.uuid === uuid);
+    const mesh = getMesh(r, uuid);
     if (mesh) {
       mesh.updateMatrixWorld(true);
       line.matrix.copy(mesh.matrixWorld);
     }
   });
+  invalidate();
 }
 
 function animateOutlines(r: ViewportRefs) {
@@ -151,9 +185,10 @@ function animateOutlines(r: ViewportRefs) {
 // ─── Main Hook ────────────────────────────────────────────────────────────
 
 export function useViewport(canvasRef: React.RefObject<HTMLCanvasElement | null>) {
-  const outlineGroupRef = useRef<THREE.Group>(new THREE.Group());
-
-  const refs = useRef<ViewportRefs>({
+  // Lazy init: a useRef *initializer* is evaluated on every render, so the old
+  // form allocated and threw away a Group and a shader LineMaterial each time.
+  const refsRef = useRef<ViewportRefs | null>(null);
+  refsRef.current ??= {
     renderer: null,
     scene: null,
     perspCamera: null,
@@ -163,15 +198,19 @@ export function useViewport(canvasRef: React.RefObject<HTMLCanvasElement | null>
     roomEnvTex: null,
     gltfRoot: null,
     allMeshes: [],
-    highlightMap: new Map(),
+    meshMap: new Map(),
     selectedUUID: null,
 
-    outlineGroup: outlineGroupRef.current,
+    outlineGroup: new THREE.Group(),
     outlineLines: new Map(),
     outlineMaterial: createOutlineMaterial(),
-  });
+  };
+  const refs = refsRef as React.MutableRefObject<ViewportRefs>;
   const animFrameRef = useRef<number>(0);
-  const store = useGLBStore();
+
+  // Only the selection set drives an effect here; every other store read goes
+  // through getState(), so this hook never re-runs on unrelated UI state.
+  const selectedUUIDs = useGLBStore((s) => s.selectedUUIDs);
 
   // ─── Init Three.js once ───────────────────────────────────────────────
   useEffect(() => {
@@ -191,7 +230,7 @@ export function useViewport(canvasRef: React.RefObject<HTMLCanvasElement | null>
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x141620);
     refs.current.scene = scene;
-    store.setScene(scene);
+    useGLBStore.getState().setScene(scene);
 
     // Add outline group directly to main scene
     scene.add(refs.current.outlineGroup);
@@ -243,6 +282,18 @@ export function useViewport(canvasRef: React.RefObject<HTMLCanvasElement | null>
     dirLight2.position.set(-10, 10, -15);
     scene.add(dirLight2);
 
+    // ─── On-demand rendering ────────────────────────────────────────────
+    // The loop draws only when something changed: a store update, an explicit
+    // invalidate(), camera motion, or the selection outline dash animation.
+    let needsRender = true;
+    setRenderRequester(() => {
+      needsRender = true;
+    });
+    // Any store change can affect what is on screen, so ask for one frame.
+    const unsubscribe = useGLBStore.subscribe(() => {
+      needsRender = true;
+    });
+
     const ro = new ResizeObserver(() => {
       const w = parent.clientWidth;
       const h = parent.clientHeight;
@@ -254,23 +305,40 @@ export function useViewport(canvasRef: React.RefObject<HTMLCanvasElement | null>
       orthoCamera.right = 5 * a;
       orthoCamera.updateProjectionMatrix();
       refs.current.outlineMaterial.resolution.set(w, h);
+      needsRender = true;
     });
     ro.observe(parent);
     renderer.setSize(parent.clientWidth, parent.clientHeight);
 
     function animate() {
       animFrameRef.current = requestAnimationFrame(animate);
-      controls.update();
-      animateOutlines(refs.current);
-      const cam = useGLBStore.getState().cameraMode === "ortho" ? orthoCamera : perspCamera;
+
+      const cameraMoved = controls.update();
+      // The dashed outline only animates while something is selected.
+      const hasOutlines = refs.current.outlineLines.size > 0;
+      if (hasOutlines) animateOutlines(refs.current);
+
+      if (!needsRender && !cameraMoved && !hasOutlines) return;
+      needsRender = false;
+
+      const cam =
+        useGLBStore.getState().cameraMode === "ortho" ? orthoCamera : perspCamera;
       // Single render pass for the whole scene
       renderer.render(scene, cam);
     }
     animate();
 
+    const r = refs.current;
     return () => {
       cancelAnimationFrame(animFrameRef.current);
       ro.disconnect();
+      unsubscribe();
+      setRenderRequester(null);
+      controls.dispose();
+      clearAllOutlines(r);
+      r.outlineMaterial.dispose();
+      disposeObject3D(scene);
+      roomEnvTex.dispose();
       renderer.dispose();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -279,148 +347,135 @@ export function useViewport(canvasRef: React.RefObject<HTMLCanvasElement | null>
   // ─── Sync outlines with selection ──────────────────────────────────────
   useEffect(() => {
     updateOutlines(refs.current);
-  }, [store.selectedUUIDs]);
+  }, [selectedUUIDs, refs]);
 
   // ─── Load GLB ─────────────────────────────────────────────────────────
-  const loadGLB = useCallback(
-    (file: File) => {
-      const r = refs.current;
-      if (!r.scene) return;
+  const loadGLB = useCallback((file: File) => {
+    const r = refs.current;
+    if (!r.scene) return;
+    const store = useGLBStore.getState();
 
-      const url = URL.createObjectURL(file);
-      const loader = new GLTFLoader();
-      loader.load(
-        url,
-        (gltf) => {
-          URL.revokeObjectURL(url);
-          if (r.gltfRoot) r.scene!.remove(r.gltfRoot);
-          r.allMeshes = [];
-          r.highlightMap.clear();
-          r.selectedUUID = null;
-          clearAllOutlines(r);
-          store.clearAll();
-          store.setScene(r.scene!);
-
-          r.gltfRoot = gltf.scene;
-          r.scene!.add(gltf.scene);
-          store.setGltfRoot(gltf.scene);
-
-          const entries: MeshEntry[] = [];
-          gltf.scene.traverse((obj) => {
-            if (!(obj as THREE.Mesh).isMesh) return;
-            const mesh = obj as THREE.Mesh;
-            mesh.castShadow = true;
-            mesh.receiveShadow = true;
-
-            // Clone material so each mesh is independent
-            if (Array.isArray(mesh.material)) {
-              mesh.material = mesh.material.map((m) => m.clone());
-            } else if (mesh.material) {
-              mesh.material = (mesh.material as THREE.Material).clone();
-            }
-
-            r.allMeshes.push(mesh);
-
-            const geo = mesh.geometry;
-            const vc = geo?.attributes?.position?.count ?? 0;
-            const fc = geo?.index ? geo.index.count / 3 : vc / 3;
-            const mat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
-
-            if (mat) {
-              store.setSnapshot(mesh.uuid, snapshotMaterial(mat));
-            }
-
-            entries.push({
-              uuid: mesh.uuid,
-              name: mesh.name || "(unnamed)",
-              mesh,
-              visible: mesh.visible,
-              vertexCount: vc,
-              faceCount: Math.round(fc),
-              hasUV: !!geo?.attributes?.uv,
-              hasNormals: !!geo?.attributes?.normal,
-              hasVertexColor: !!geo?.attributes?.color,
-              materialType: mat?.type ?? "—",
-            });
-          });
-
-          store.setMeshEntries(entries);
-
-          const initStep: HistoryStep = new Map();
-          entries.forEach((e) => {
-            const mat2 = Array.isArray(e.mesh.material) ? e.mesh.material[0] : e.mesh.material;
-            if (mat2) initStep.set(e.uuid, snapshotMaterial(mat2 as THREE.Material));
-          });
-          store.pushHistory(initStep);
-          frameAll(r);
-        },
-        undefined,
-        (err) => {
-          URL.revokeObjectURL(url);
-          console.error(err);
-          alert("Failed to load GLB file.");
+    const url = URL.createObjectURL(file);
+    const loader = new GLTFLoader();
+    loader.load(
+      url,
+      (gltf) => {
+        URL.revokeObjectURL(url);
+        if (r.gltfRoot) {
+          r.scene!.remove(r.gltfRoot);
+          // Release the previous model's GPU memory before replacing it.
+          disposeObject3D(r.gltfRoot);
         }
-      );
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [store]
-  );
+        r.allMeshes = [];
+        r.meshMap.clear();
+        r.selectedUUID = null;
+        clearAllOutlines(r);
+        store.clearAll();
+        store.setScene(r.scene!);
+
+        r.gltfRoot = gltf.scene;
+        r.scene!.add(gltf.scene);
+        store.setGltfRoot(gltf.scene);
+
+        const entries: MeshEntry[] = [];
+        const snapshots = new Map<string, MaterialSnapshot>();
+        gltf.scene.traverse((obj) => {
+          if (!(obj as THREE.Mesh).isMesh) return;
+          const mesh = obj as THREE.Mesh;
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+
+          // Clone material so each mesh is independent
+          if (Array.isArray(mesh.material)) {
+            mesh.material = mesh.material.map((m) => m.clone());
+          } else if (mesh.material) {
+            mesh.material = (mesh.material as THREE.Material).clone();
+          }
+
+          r.allMeshes.push(mesh);
+          r.meshMap.set(mesh.uuid, mesh);
+
+          const geo = mesh.geometry;
+          const vc = geo?.attributes?.position?.count ?? 0;
+          const fc = geo?.index ? geo.index.count / 3 : vc / 3;
+          const mat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
+
+          if (mat) snapshots.set(mesh.uuid, snapshotMaterial(mat));
+
+          entries.push({
+            uuid: mesh.uuid,
+            name: mesh.name || "(unnamed)",
+            mesh,
+            visible: mesh.visible,
+            vertexCount: vc,
+            faceCount: Math.round(fc),
+            hasUV: !!geo?.attributes?.uv,
+            hasNormals: !!geo?.attributes?.normal,
+            hasVertexColor: !!geo?.attributes?.color,
+            materialType: mat?.type ?? "—",
+          });
+        });
+
+        // One store write for every snapshot instead of one write per mesh.
+        store.setSnapshots(snapshots);
+        store.setMeshEntries(entries);
+        store.pushHistoryImmediate(new Map(snapshots));
+        frameAll(r);
+      },
+      undefined,
+      (err) => {
+        URL.revokeObjectURL(url);
+        console.error(err);
+        alert("Failed to load GLB file.");
+      }
+    );
+  }, [refs]);
 
   // ─── Canvas click with multi-select ──────────────────────────────────
-  const handleCanvasClick = useCallback(
-    (e: React.MouseEvent<HTMLCanvasElement>) => {
-      const r = refs.current;
-      if (!r.renderer || !r.allMeshes.length) return;
-      const rect = (e.target as HTMLCanvasElement).getBoundingClientRect();
-      const mouse = new THREE.Vector2(
-        ((e.clientX - rect.left) / rect.width) * 2 - 1,
-        -((e.clientY - rect.top) / rect.height) * 2 + 1
-      );
-      const cam =
-        useGLBStore.getState().cameraMode === "ortho"
-          ? r.orthoCamera!
-          : r.perspCamera!;
-      const raycaster = new THREE.Raycaster();
-      raycaster.setFromCamera(mouse, cam);
-      const hits = raycaster.intersectObjects(r.allMeshes, false);
-      if (hits.length) {
-        const hit = hits[0].object as THREE.Mesh;
-        if (e.ctrlKey || e.metaKey) {
-          store.toggleMeshSelection(hit.uuid);
-        } else if (e.shiftKey) {
-          store.rangeSelectMesh(hit.uuid);
-        } else {
-          store.selectMesh(hit.uuid);
-        }
-      }
-    },
-    [store]
-  );
+  const raycasterRef = useRef(new THREE.Raycaster());
+  const mouseRef = useRef(new THREE.Vector2());
+
+  const handleCanvasClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    const r = refs.current;
+    if (!r.renderer || !r.allMeshes.length) return;
+    const store = useGLBStore.getState();
+
+    const rect = (e.target as HTMLCanvasElement).getBoundingClientRect();
+    mouseRef.current.set(
+      ((e.clientX - rect.left) / rect.width) * 2 - 1,
+      -((e.clientY - rect.top) / rect.height) * 2 + 1
+    );
+    const cam = store.cameraMode === "ortho" ? r.orthoCamera! : r.perspCamera!;
+    const raycaster = raycasterRef.current;
+    raycaster.setFromCamera(mouseRef.current, cam);
+    const hits = raycaster.intersectObjects(r.allMeshes, false);
+    if (!hits.length) return;
+
+    const hit = hits[0].object as THREE.Mesh;
+    if (e.ctrlKey || e.metaKey) {
+      store.toggleMeshSelection(hit.uuid);
+    } else if (e.shiftKey) {
+      store.rangeSelectMesh(hit.uuid);
+    } else {
+      store.selectMesh(hit.uuid);
+    }
+  }, [refs]);
 
   return { refs, loadGLB, handleCanvasClick };
 }
 
 // ─── Standalone Viewport Helpers ──────────────────────────────────────────
 
-export function applyHighlight(_mesh: THREE.Mesh, _r: ViewportRefs) {
-  // Selection is handled strictly via 3D animated line outlines.
-  // We do NOT modify material emissive/color so the user gets 100% true-to-life material preview.
-}
-
-export function clearHighlight(_uuid: string, _r: ViewportRefs) {
-  // No-op
-}
-
-export function clearAllHighlights(_r: ViewportRefs) {
-  // No-op
-}
-
-export function selectMeshByUUID(uuid: string, r: ViewportRefs) {
-  r.selectedUUID = uuid;
-}
-
-export function syncHighlightsToSelection(_uuids: Set<string>, _r: ViewportRefs) {
-  // No-op - selection outlines are synced automatically via updateOutlines
+/** Remove a mesh from the scene, the lookup tables and the GPU. */
+export function deleteMeshFromViewport(uuid: string, r: ViewportRefs) {
+  const mesh = getMesh(r, uuid);
+  if (!mesh) return;
+  removeOutline(uuid, r);
+  if (mesh.parent) mesh.parent.remove(mesh);
+  disposeObject3D(mesh);
+  r.meshMap.delete(uuid);
+  r.allMeshes = r.allMeshes.filter((m) => m !== mesh);
+  invalidate();
 }
 
 export function frameAll(r: ViewportRefs) {
@@ -464,10 +519,11 @@ export function frameAll(r: ViewportRefs) {
   }
 
   r.controls.update();
+  invalidate();
 }
 
 export function frameSelected(uuid: string, r: ViewportRefs) {
-  const mesh = r.allMeshes.find((m) => m.uuid === uuid);
+  const mesh = getMesh(r, uuid);
   if (!mesh || !r.perspCamera || !r.controls) return;
   mesh.updateMatrixWorld(true);
   const box = new THREE.Box3().setFromObject(mesh);
@@ -503,14 +559,28 @@ export function frameSelected(uuid: string, r: ViewportRefs) {
   }
 
   r.controls.update();
+  invalidate();
+}
+
+/** Snapshot the current material state of the given meshes. */
+export function snapshotMeshes(uuids: Iterable<string>, r: ViewportRefs): HistoryStep {
+  const step: HistoryStep = new Map();
+  for (const uuid of uuids) {
+    const mesh = getMesh(r, uuid);
+    if (!mesh) continue;
+    const mat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
+    if (mat) step.set(uuid, snapshotMaterial(mat as THREE.Material));
+  }
+  return step;
 }
 
 /** Apply a history step (snapshot map) back onto all meshes */
 export function applyHistoryStep(step: HistoryStep, r: ViewportRefs) {
   step.forEach((snap, uuid) => {
-    const mesh = r.allMeshes.find((m) => m.uuid === uuid);
+    const mesh = getMesh(r, uuid);
     if (!mesh) return;
     const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
     mats.forEach((m) => applySnapshot(m as THREE.MeshStandardMaterial, snap));
   });
+  invalidate();
 }

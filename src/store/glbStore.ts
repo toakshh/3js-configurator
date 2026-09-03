@@ -68,6 +68,13 @@ interface GLBStore {
   history: HistoryStep[];
   historyIndex: number; // points to current state in history
 
+  /**
+   * Bumped whenever a Three.js object is mutated in place (material props,
+   * transforms, textures). Components that read live Three.js state subscribe
+   * to this instead of forcing a re-render by cloning `meshEntries`.
+   */
+  revision: number;
+
   // actions
   setScene: (scene: THREE.Scene) => void;
   setGltfRoot: (root: THREE.Group | null) => void;
@@ -90,16 +97,29 @@ interface GLBStore {
   setSkybox: (v: boolean) => void;
   setCameraMode: (m: "perspective" | "ortho") => void;
   setSnapshot: (uuid: string, snap: MaterialSnapshot) => void;
+  /** Replace the whole snapshot map in one write (used on load). */
+  setSnapshots: (snaps: Map<string, MaterialSnapshot>) => void;
+  /** Signal that Three.js state changed in place; re-renders live readers. */
+  bumpRevision: () => void;
   updateMeshVisibility: (uuid: string, visible: boolean) => void;
   clearAll: () => void;
 
   // history
   pushHistory: (step: HistoryStep) => void;
+  pushHistoryImmediate: (step: HistoryStep) => void;
   undo: () => HistoryStep | null;
   redo: () => HistoryStep | null;
 }
 
 const MAX_HISTORY = 50;
+
+/**
+ * Pushes closer together than this belong to one continuous gesture (a slider
+ * drag fires dozens of change events). Only the first one is recorded, so a
+ * single drag costs a single undo step instead of filling the whole stack.
+ */
+const HISTORY_COALESCE_MS = 400;
+let lastPushAt = 0;
 
 export const useGLBStore = create<GLBStore>((set, get) => ({
   scene: null,
@@ -117,6 +137,7 @@ export const useGLBStore = create<GLBStore>((set, get) => ({
   snapshots: new Map(),
   history: [],
   historyIndex: -1,
+  revision: 0,
 
   setScene: (scene) => set({ scene }),
   setGltfRoot: (gltfRoot) => set({ gltfRoot }),
@@ -189,6 +210,10 @@ export const useGLBStore = create<GLBStore>((set, get) => ({
       return { snapshots: next };
     }),
 
+  bumpRevision: () => set((state) => ({ revision: state.revision + 1 })),
+
+  setSnapshots: (snapshots) => set({ snapshots }),
+
   updateMeshVisibility: (uuid, visible) =>
     set((state) => ({
       meshEntries: state.meshEntries.map((e) =>
@@ -196,7 +221,8 @@ export const useGLBStore = create<GLBStore>((set, get) => ({
       ),
     })),
 
-  clearAll: () =>
+  clearAll: () => {
+    lastPushAt = 0;
     set({
       gltfRoot: null,
       meshEntries: [],
@@ -206,9 +232,17 @@ export const useGLBStore = create<GLBStore>((set, get) => ({
       globalWireframe: false,
       history: [],
       historyIndex: -1,
-    }),
+    });
+  },
 
-  pushHistory: (step) =>
+  pushHistory: (step) => {
+    const now = Date.now();
+    // Mid-gesture: the snapshot taken at the start of the drag already covers it.
+    if (now - lastPushAt < HISTORY_COALESCE_MS) {
+      lastPushAt = now;
+      return;
+    }
+    lastPushAt = now;
     set((state) => {
       // truncate any redo future
       const truncated = state.history.slice(0, state.historyIndex + 1);
@@ -216,7 +250,14 @@ export const useGLBStore = create<GLBStore>((set, get) => ({
       // cap at MAX_HISTORY
       if (next.length > MAX_HISTORY) next.shift();
       return { history: next, historyIndex: next.length - 1 };
-    }),
+    });
+  },
+
+  /** Append a step without gesture coalescing (used to capture the live present). */
+  pushHistoryImmediate: (step) => {
+    lastPushAt = 0;
+    get().pushHistory(step);
+  },
 
   undo: () => {
     const state = get();

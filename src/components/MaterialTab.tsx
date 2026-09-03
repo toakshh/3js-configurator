@@ -2,9 +2,8 @@
 
 import * as THREE from "three";
 import { useGLBStore } from "@/store/glbStore";
-import { getMeshMat, setAllMats, colorToHex, snapshotMaterial, textureToDataURL, applySnapshot } from "@/lib/matUtils";
-import { ViewportRefs } from "@/hooks/useViewport";
-import { useCallback } from "react";
+import { getMeshMat, setAllMats, colorToHex, snapshotMaterial, textureToDataURL } from "@/lib/matUtils";
+import { ViewportRefs, getMesh, snapshotMeshes } from "@/hooks/useViewport";
 
 // ─── Design tokens ────────────────────────────────────────────────────────
 const S = {
@@ -20,15 +19,6 @@ function SectionTitle({ icon, children }: { icon?: string; children: React.React
     <div className={S.section}>
       {icon && <span className="text-[13px]">{icon}</span>}
       <span>{children}</span>
-    </div>
-  );
-}
-
-function PropRow({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="flex items-center gap-3 mb-3">
-      <span className={`${S.label} w-32 shrink-0`}>{label}</span>
-      <div className="flex-1 min-w-0">{children}</div>
     </div>
   );
 }
@@ -259,13 +249,7 @@ function TexSlot({
 
 // ─── Multi-select banner ───────────────────────────────────────────────────
 
-function MultiSelectBanner({
-  count,
-  onApplyAll,
-}: {
-  count: number;
-  onApplyAll: () => void;
-}) {
+function MultiSelectBanner({ count }: { count: number }) {
   if (count <= 1) return null;
   return (
     <div className="mx-4 mb-4 p-3 bg-[#5b6ef5]/10 border border-[#5b6ef5]/30 rounded-xl flex items-center gap-3">
@@ -305,42 +289,32 @@ export default function MaterialTab({
 }: {
   vpRefs: React.MutableRefObject<ViewportRefs>;
 }) {
-  const store = useGLBStore();
-  const uuid = store.selectedUUID;
-  const selectedUUIDs = store.selectedUUIDs;
+  const uuid = useGLBStore((s) => s.selectedUUID);
+  const selectedUUIDs = useGLBStore((s) => s.selectedUUIDs);
+  // Every control below reads live material state, so re-render on bumps.
+  useGLBStore((s) => s.revision);
+  const refresh = useGLBStore((s) => s.bumpRevision);
+  const setSnapshot = useGLBStore((s) => s.setSnapshot);
 
-  const primaryMesh = uuid
-    ? vpRefs.current.allMeshes.find((m) => m.uuid === uuid) ?? null
-    : null;
+  const primaryMesh = uuid ? getMesh(vpRefs.current, uuid) : null;
 
-  const refresh = useCallback(() => {
-    store.setMeshEntries([...store.meshEntries]);
-  }, [store]);
-
-  // Record a history snapshot before a change
-  const pushHistory = useCallback(() => {
-    const step = new Map<string, ReturnType<typeof snapshotMaterial>>();
-    selectedUUIDs.forEach((id) => {
-      const mesh = vpRefs.current.allMeshes.find((m) => m.uuid === id);
-      if (!mesh) return;
-      const mat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
-      if (mat) step.set(id, snapshotMaterial(mat as THREE.Material));
-    });
-    store.pushHistory(step);
-  }, [selectedUUIDs, vpRefs, store]);
+  // Record a history snapshot before a change. The store coalesces calls that
+  // arrive within one gesture, so a slider drag costs a single undo step.
+  // (Not wrapped in useCallback: reading vpRefs.current defeats the React
+  // Compiler's memoization check and makes it skip the whole component.)
+  const pushHistory = () => {
+    useGLBStore.getState().pushHistory(snapshotMeshes(selectedUUIDs, vpRefs.current));
+  };
 
   // Apply a property mutation to ALL selected meshes
-  const setForAll = useCallback(
-    (fn: (mat: THREE.MeshStandardMaterial) => void) => {
-      selectedUUIDs.forEach((id) => {
-        const mesh = vpRefs.current.allMeshes.find((m) => m.uuid === id);
-        if (!mesh) return;
-        setAllMats(mesh, fn);
-      });
-      refresh();
-    },
-    [selectedUUIDs, vpRefs, refresh]
-  );
+  const setForAll = (fn: (mat: THREE.MeshStandardMaterial) => void) => {
+    selectedUUIDs.forEach((id) => {
+      const mesh = getMesh(vpRefs.current, id);
+      if (!mesh) return;
+      setAllMats(mesh, fn);
+    });
+    refresh();
+  };
 
   if (!primaryMesh) return <EmptyState />;
 
@@ -368,7 +342,7 @@ export default function MaterialTab({
   const upgradeAll = (type: "standard" | "physical") => {
     pushHistory();
     selectedUUIDs.forEach((id) => {
-      const mesh = vpRefs.current.allMeshes.find((m) => m.uuid === id);
+      const mesh = getMesh(vpRefs.current, id);
       if (!mesh) return;
       const old = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
       if (!old) return;
@@ -388,14 +362,14 @@ export default function MaterialTab({
         } catch {}
       });
       mesh.material = newMat;
-      store.setSnapshot(id, snapshotMaterial(newMat));
+      setSnapshot(id, snapshotMaterial(newMat));
     });
     refresh();
   };
 
   return (
     <div className="px-5 pb-6">
-      <MultiSelectBanner count={multiCount} onApplyAll={() => {}} />
+      <MultiSelectBanner count={multiCount} />
 
       {/* ── Base Color ──────────────────────────────── */}
       <SectionTitle icon="🎨">Base Color & Surface</SectionTitle>
@@ -493,10 +467,11 @@ export default function MaterialTab({
         label="Visible"
         checked={primaryMesh.visible}
         onChange={(v) => {
+          const updateMeshVisibility = useGLBStore.getState().updateMeshVisibility;
           selectedUUIDs.forEach((id) => {
-            const mesh = vpRefs.current.allMeshes.find((m) => m.uuid === id);
+            const mesh = getMesh(vpRefs.current, id);
             if (mesh) mesh.visible = v;
-            store.updateMeshVisibility(id, v);
+            updateMeshVisibility(id, v);
           });
         }}
       />
@@ -505,7 +480,7 @@ export default function MaterialTab({
         checked={primaryMesh.castShadow}
         onChange={(v) => {
           selectedUUIDs.forEach((id) => {
-            const mesh = vpRefs.current.allMeshes.find((m) => m.uuid === id);
+            const mesh = getMesh(vpRefs.current, id);
             if (mesh) mesh.castShadow = v;
           });
           refresh();
@@ -516,7 +491,7 @@ export default function MaterialTab({
         checked={primaryMesh.receiveShadow}
         onChange={(v) => {
           selectedUUIDs.forEach((id) => {
-            const mesh = vpRefs.current.allMeshes.find((m) => m.uuid === id);
+            const mesh = getMesh(vpRefs.current, id);
             if (mesh) mesh.receiveShadow = v;
           });
           refresh();

@@ -1,8 +1,7 @@
 "use client";
 
-import * as THREE from "three";
 import { useGLBStore } from "@/store/glbStore";
-import { ViewportRefs } from "@/hooks/useViewport";
+import { ViewportRefs, getMesh } from "@/hooks/useViewport";
 
 function SectionTitle({ children }: { children: React.ReactNode }) {
   return (
@@ -55,11 +54,12 @@ export default function TransformTab({
 }: {
   vpRefs: React.MutableRefObject<ViewportRefs>;
 }) {
-  const store = useGLBStore();
-  const uuid = store.selectedUUID;
-  const mesh = uuid ? vpRefs.current.allMeshes.find((m) => m.uuid === uuid) : null;
-  const forceUpdate = useGLBStore((s) => s.setMeshEntries);
-  const refresh = () => forceUpdate([...store.meshEntries]);
+  const uuid = useGLBStore((s) => s.selectedUUID);
+  // Transforms live on the Three.js object; `revision` is what tells this
+  // component the numbers it displays have changed.
+  useGLBStore((s) => s.revision);
+  const refresh = useGLBStore((s) => s.bumpRevision);
+  const mesh = uuid ? getMesh(vpRefs.current, uuid) : null;
 
   if (!mesh) {
     return (

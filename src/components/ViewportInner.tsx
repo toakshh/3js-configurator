@@ -2,12 +2,22 @@
 
 import { useEffect } from "react";
 import * as THREE from "three";
-import { useGLBStore } from "@/store/glbStore";
-import {
-  ViewportRefs,
-  frameAll,
-  frameSelected,
-} from "@/hooks/useViewport";
+import { useGLBStore, EnvMode } from "@/store/glbStore";
+import { ViewportRefs, frameAll, frameSelected } from "@/hooks/useViewport";
+
+const ENV_LABELS: Record<EnvMode, string> = {
+  studio: "Studio",
+  outdoor: "Outdoor",
+  dark: "Dark",
+  none: "None",
+};
+
+const ENV_CYCLE: Record<EnvMode, EnvMode> = {
+  studio: "outdoor",
+  outdoor: "dark",
+  dark: "none",
+  none: "studio",
+};
 
 export default function ViewportInner({
   canvasRef,
@@ -20,14 +30,32 @@ export default function ViewportInner({
   loadGLB: (f: File) => void;
   vpRefs: React.MutableRefObject<ViewportRefs>;
 }) {
-  const store = useGLBStore();
+  // Field-level selectors: toggling the grid no longer re-renders the panels,
+  // and a search keystroke no longer re-renders the viewport chrome.
+  const cameraMode = useGLBStore((s) => s.cameraMode);
+  const showGrid = useGLBStore((s) => s.showGrid);
+  const globalWireframe = useGLBStore((s) => s.globalWireframe);
+  const envMode = useGLBStore((s) => s.envMode);
+  const skybox = useGLBStore((s) => s.skybox);
+  const selectedUUID = useGLBStore((s) => s.selectedUUID);
+  const selCount = useGLBStore((s) => s.selectedUUIDs.size);
+  const meshCount = useGLBStore((s) => s.meshEntries.length);
+  const selectedName = useGLBStore(
+    (s) => s.meshEntries.find((e) => e.uuid === s.selectedUUID)?.name ?? null
+  );
+
+  const setCameraMode = useGLBStore((s) => s.setCameraMode);
+  const setGlobalWireframe = useGLBStore((s) => s.setGlobalWireframe);
+  const setShowGrid = useGLBStore((s) => s.setShowGrid);
+  const setEnvMode = useGLBStore((s) => s.setEnvMode);
+  const setSkybox = useGLBStore((s) => s.setSkybox);
+  const clearSelection = useGLBStore((s) => s.clearSelection);
 
   // Camera mode switch handler (perspective <-> ortho)
   useEffect(() => {
     const r = vpRefs.current;
     if (!r.controls || !r.perspCamera || !r.orthoCamera) return;
-    const mode = store.cameraMode;
-    if (mode === "ortho") {
+    if (cameraMode === "ortho") {
       r.orthoCamera.position.copy(r.perspCamera.position);
       r.orthoCamera.quaternion.copy(r.perspCamera.quaternion);
       const d = r.perspCamera.position.distanceTo(r.controls.target);
@@ -46,74 +74,57 @@ export default function ViewportInner({
       r.controls.object = r.perspCamera;
     }
     r.controls.update();
-  }, [store.cameraMode]);
+  }, [cameraMode, vpRefs]);
 
   // Grid
   useEffect(() => {
-    if (vpRefs.current.grid) vpRefs.current.grid.visible = store.showGrid;
-  }, [store.showGrid]);
+    if (vpRefs.current.grid) vpRefs.current.grid.visible = showGrid;
+  }, [showGrid, vpRefs]);
 
   // Global wireframe
   useEffect(() => {
     vpRefs.current.allMeshes.forEach((mesh) => {
       const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-      mats.forEach((m) => { (m as THREE.MeshStandardMaterial).wireframe = store.globalWireframe; });
+      mats.forEach((m) => {
+        (m as THREE.MeshStandardMaterial).wireframe = globalWireframe;
+      });
     });
-  }, [store.globalWireframe]);
+  }, [globalWireframe, vpRefs]);
 
-  // Environment
+  // Environment + background. Skybox is folded in here so the two settings
+  // can't fight over scene.background across separate effects.
   useEffect(() => {
     const r = vpRefs.current;
     if (!r.scene || !r.renderer) return;
     const { scene, renderer } = r;
-    if (store.envMode === "studio") {
-      scene.environment = r.roomEnvTex;
-      scene.background = new THREE.Color(0x141620);
-      renderer.toneMappingExposure = 1.0;
-    } else if (store.envMode === "outdoor") {
-      scene.environment = r.roomEnvTex;
-      scene.background = new THREE.Color(0x87ceeb);
-      renderer.toneMappingExposure = 1.5;
-    } else if (store.envMode === "dark") {
-      scene.environment = r.roomEnvTex;
-      scene.background = new THREE.Color(0x050810);
-      renderer.toneMappingExposure = 0.3;
-    } else {
-      scene.environment = null;
-      scene.background = new THREE.Color(0x141620);
-      renderer.toneMappingExposure = 1.0;
+
+    let background = 0x141620;
+    let exposure = 1.0;
+    if (envMode === "outdoor") {
+      background = 0x87ceeb;
+      exposure = 1.5;
+    } else if (envMode === "dark") {
+      background = 0x050810;
+      exposure = 0.3;
     }
-  }, [store.envMode]);
+    if (skybox) background = 0x1a2a4a;
 
-  // Skybox
+    scene.environment = envMode === "none" ? null : r.roomEnvTex;
+    scene.background = new THREE.Color(background);
+    renderer.toneMappingExposure = exposure;
+  }, [envMode, skybox, vpRefs]);
+
+  // Mirror the primary selection into the viewport refs
   useEffect(() => {
-    const r = vpRefs.current;
-    if (!r.scene) return;
-    r.scene.background = store.skybox ? new THREE.Color(0x1a2a4a) : new THREE.Color(0x141620);
-  }, [store.skybox]);
-
-  // Sync highlights whenever selectedUUIDs changes
-  useEffect(() => {
-    vpRefs.current.selectedUUID = store.selectedUUID;
-  }, [store.selectedUUIDs, store.selectedUUID]);
-
-  const envLabels: Record<string, string> = {
-    studio: "Studio", outdoor: "Outdoor", dark: "Dark", none: "None",
-  };
-  const envCycle: Record<string, string> = {
-    studio: "outdoor", outdoor: "dark", dark: "none", none: "studio",
-  };
-
-  const selCount = store.selectedUUIDs.size;
+    vpRefs.current.selectedUUID = selectedUUID;
+  }, [selectedUUID, vpRefs]);
 
   return (
     <div className="relative w-full h-full overflow-hidden bg-[#141620]">
       <canvas
         ref={canvasRef}
         className="block w-full h-full cursor-crosshair"
-        onClick={(e) => {
-          handleCanvasClick(e);
-        }}
+        onClick={handleCanvasClick}
         onDragOver={(e) => e.preventDefault()}
         onDrop={(e) => {
           e.preventDefault();
@@ -123,7 +134,7 @@ export default function ViewportInner({
       />
 
       {/* No-file overlay */}
-      {store.meshEntries.length === 0 && (
+      {meshCount === 0 && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 pointer-events-none text-[#334]">
           <svg width={80} height={80} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={0.8} className="opacity-15">
             <path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z" />
@@ -137,7 +148,7 @@ export default function ViewportInner({
       {/* Top toolbar */}
       <div className="absolute top-3 left-3 flex gap-1.5 flex-wrap pointer-events-auto">
         {(["perspective", "ortho"] as const).map((m) => (
-          <VpBtn key={m} active={store.cameraMode === m} onClick={() => store.setCameraMode(m)}>
+          <VpBtn key={m} active={cameraMode === m} onClick={() => setCameraMode(m)}>
             {m === "perspective" ? "Perspective" : "Ortho"}
           </VpBtn>
         ))}
@@ -149,27 +160,27 @@ export default function ViewportInner({
             r.controls.update();
           }
         }}>Reset View</VpBtn>
-        <VpBtn active={store.globalWireframe} onClick={() => store.setGlobalWireframe(!store.globalWireframe)}>
+        <VpBtn active={globalWireframe} onClick={() => setGlobalWireframe(!globalWireframe)}>
           Wireframe
         </VpBtn>
-        <VpBtn onClick={() => store.setShowGrid(!store.showGrid)}>
-          {store.showGrid ? "Hide Grid" : "Show Grid"}
+        <VpBtn onClick={() => setShowGrid(!showGrid)}>
+          {showGrid ? "Hide Grid" : "Show Grid"}
         </VpBtn>
-        <VpBtn onClick={() => store.setEnvMode(envCycle[store.envMode] as "studio")}>
-          Env: {envLabels[store.envMode]}
+        <VpBtn onClick={() => setEnvMode(ENV_CYCLE[envMode])}>
+          Env: {ENV_LABELS[envMode]}
         </VpBtn>
-        <VpBtn active={store.skybox} onClick={() => store.setSkybox(!store.skybox)}>
+        <VpBtn active={skybox} onClick={() => setSkybox(!skybox)}>
           Skybox
         </VpBtn>
       </div>
 
       {/* Selection label */}
-      {store.selectedUUID && (
+      {selectedUUID && (
         <div className="absolute top-3 right-3 bg-black/60 border border-[#2e3250] rounded-md px-3 py-1.5 text-xs text-[#7c8bff] backdrop-blur pointer-events-none flex items-center gap-2">
           {selCount > 1 ? (
             <span>{selCount} meshes selected</span>
           ) : (
-            <span>● {store.meshEntries.find((e) => e.uuid === store.selectedUUID)?.name ?? "—"}</span>
+            <span>● {selectedName ?? "—"}</span>
           )}
         </div>
       )}
@@ -177,12 +188,10 @@ export default function ViewportInner({
       {/* Bottom toolbar */}
       <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex gap-1.5 pointer-events-auto">
         <VpBtn onClick={() => frameAll(vpRefs.current)}>Frame All</VpBtn>
-        <VpBtn onClick={() => { if (store.selectedUUID) frameSelected(store.selectedUUID, vpRefs.current); }}>
+        <VpBtn onClick={() => { if (selectedUUID) frameSelected(selectedUUID, vpRefs.current); }}>
           Frame Selected
         </VpBtn>
-        <VpBtn onClick={() => {
-          store.clearSelection();
-        }}>Deselect</VpBtn>
+        <VpBtn onClick={clearSelection}>Deselect</VpBtn>
       </div>
     </div>
   );

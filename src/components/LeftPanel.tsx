@@ -1,5 +1,6 @@
 "use client";
 
+import { useMemo } from "react";
 import { useGLBStore } from "@/store/glbStore";
 import DropZone from "./DropZone";
 import MeshList from "./MeshList";
@@ -16,7 +17,22 @@ export default function LeftPanel({
   collapsed: boolean;
   onToggle: () => void;
 }) {
-  const store = useGLBStore();
+  const searchQuery = useGLBStore((s) => s.searchQuery);
+  const setSearchQuery = useGLBStore((s) => s.setSearchQuery);
+  const meshEntries = useGLBStore((s) => s.meshEntries);
+
+  const totals = useMemo(
+    () =>
+      meshEntries.reduce(
+        (acc, e) => {
+          acc.verts += e.vertexCount;
+          acc.tris += e.faceCount;
+          return acc;
+        },
+        { verts: 0, tris: 0 }
+      ),
+    [meshEntries]
+  );
 
   return (
     <div
@@ -44,9 +60,9 @@ export default function LeftPanel({
           <input
             type="text"
             placeholder="🔍  Search meshes…"
-            value={store.searchQuery}
+            value={searchQuery}
             className="w-full bg-[#22263a] border border-[#2e3250] rounded-lg text-[12px] text-[#ccd] px-3 py-1.5 outline-none focus:border-[#5b6ef5] placeholder:text-[#445] transition-colors"
-            onChange={(e) => store.setSearchQuery(e.target.value)}
+            onChange={(e) => setSearchQuery(e.target.value)}
           />
         </div>
 
@@ -54,15 +70,11 @@ export default function LeftPanel({
         <MeshList vpRefs={vpRefs} />
 
         {/* Stats footer */}
-        {store.meshEntries.length > 0 && (
+        {meshEntries.length > 0 && (
           <div className="px-3 py-2 border-t border-[#2e3250] bg-[#22263a] shrink-0 flex justify-between text-[10px] text-[#445]">
-            <span>{store.meshEntries.length} meshes</span>
-            <span>
-              {store.meshEntries.reduce((acc, e) => acc + e.vertexCount, 0).toLocaleString()} verts
-            </span>
-            <span>
-              {store.meshEntries.reduce((acc, e) => acc + e.faceCount, 0).toLocaleString()} tris
-            </span>
+            <span>{meshEntries.length} meshes</span>
+            <span>{totals.verts.toLocaleString()} verts</span>
+            <span>{totals.tris.toLocaleString()} tris</span>
           </div>
         )}
       </div>
