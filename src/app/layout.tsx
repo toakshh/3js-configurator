@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { Analytics } from "@vercel/analytics/next";
 import { Toaster } from "react-hot-toast";
 import { ConfirmProvider } from "@/components/ConfirmDialog";
 import "./globals.css";
@@ -15,6 +16,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <ConfirmProvider>
           {children}
         </ConfirmProvider>
+        <Analytics />
         <Toaster
           position="bottom-center"
           toastOptions={{
