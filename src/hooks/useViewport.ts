@@ -9,8 +9,11 @@ import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
 import { LineSegmentsGeometry } from "three/examples/jsm/lines/LineSegmentsGeometry.js";
 import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 import { useGLBStore, MeshEntry, HistoryStep, MaterialSnapshot } from "@/store/glbStore";
-import { snapshotMaterial, applySnapshot } from "@/lib/matUtils";
+import type { LevelId } from "@/lib/optimizer";
+import { snapshotMaterial, applySnapshot, snapshotsEqual } from "@/lib/matUtils";
 import { invalidate, setRenderRequester } from "@/lib/renderScheduler";
+import { clearOptimizerCache, captureMeshState, triangleCount } from "@/lib/optimizer";
+import { toast } from "react-hot-toast";
 
 export { invalidate } from "@/lib/renderScheduler";
 
@@ -370,7 +373,11 @@ export function useViewport(canvasRef: React.RefObject<HTMLCanvasElement | null>
         r.meshMap.clear();
         r.selectedUUID = null;
         clearAllOutlines(r);
+        // The optimizer holds pristine geometry and level variants for the
+        // previous model, and the history that referenced them is about to go.
+        clearOptimizerCache();
         store.clearAll();
+        store.setModelName(file.name.replace(/.gl(b|tf)$/i, "") || "model");
         store.setScene(r.scene!);
 
         r.gltfRoot = gltf.scene;
@@ -419,14 +426,26 @@ export function useViewport(canvasRef: React.RefObject<HTMLCanvasElement | null>
         // One store write for every snapshot instead of one write per mesh.
         store.setSnapshots(snapshots);
         store.setMeshEntries(entries);
-        store.pushHistoryImmediate(new Map(snapshots));
+
+        // Seed history with the pristine state — geometry included — so undoing
+        // all the way back lands on the model exactly as it was loaded.
+        const initial: HistoryStep = new Map();
+        entries.forEach((e) => {
+          initial.set(e.uuid, {
+            material: snapshots.get(e.uuid),
+            geometry: e.mesh.geometry,
+            materialRef: e.mesh.material,
+            level: null,
+          });
+        });
+        store.pushHistoryImmediate(initial);
         frameAll(r);
       },
       undefined,
       (err) => {
         URL.revokeObjectURL(url);
         console.error(err);
-        alert("Failed to load GLB file.");
+        toast.error("Failed to load GLB — check it's a valid .glb file.", { duration: 5000 });
       }
     );
   }, [refs]);
@@ -562,25 +581,112 @@ export function frameSelected(uuid: string, r: ViewportRefs) {
   invalidate();
 }
 
-/** Snapshot the current material state of the given meshes. */
+/**
+ * Snapshot the full undoable state of the given meshes: material property
+ * values, plus the geometry and material objects themselves so that an
+ * optimization (which swaps whole objects) can be undone the same way a slider
+ * tweak can.
+ */
 export function snapshotMeshes(uuids: Iterable<string>, r: ViewportRefs): HistoryStep {
   const step: HistoryStep = new Map();
+  const levels = useGLBStore.getState().meshLevels;
   for (const uuid of uuids) {
     const mesh = getMesh(r, uuid);
     if (!mesh) continue;
     const mat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
-    if (mat) step.set(uuid, snapshotMaterial(mat as THREE.Material));
+    const state = captureMeshState(mesh);
+    step.set(uuid, {
+      material: mat ? snapshotMaterial(mat as THREE.Material) : undefined,
+      geometry: state.geometry,
+      materialRef: state.material,
+      level: levels.get(uuid) ?? null,
+    });
   }
   return step;
 }
 
-/** Apply a history step (snapshot map) back onto all meshes */
+/**
+ * Whether the scene already looks exactly like this step. Used to avoid
+ * recording a redundant "current state" entry, which would otherwise cost the
+ * user a wasted Undo press right after a Redo.
+ */
+export function stepMatchesScene(step: HistoryStep, r: ViewportRefs): boolean {
+  for (const [uuid, snap] of step) {
+    const mesh = getMesh(r, uuid);
+    if (!mesh) return false;
+    if (snap.geometry && snap.geometry !== mesh.geometry) return false;
+    if (snap.materialRef && snap.materialRef !== mesh.material) return false;
+    if (snap.material) {
+      const mat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
+      if (!mat) return false;
+      if (!snapshotsEqual(snap.material, snapshotMaterial(mat as THREE.Material))) return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Put a history step back onto the scene: geometry and material objects first,
+ * then material property values on top of whatever material is now in place.
+ * Also re-syncs the derived store state (per-mesh level, vertex/triangle counts)
+ * so the panels agree with what is actually on screen.
+ */
 export function applyHistoryStep(step: HistoryStep, r: ViewportRefs) {
+  const store = useGLBStore.getState();
+  const restoredLevels = new Map<string, LevelId | null>();
+
   step.forEach((snap, uuid) => {
     const mesh = getMesh(r, uuid);
     if (!mesh) return;
-    const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-    mats.forEach((m) => applySnapshot(m as THREE.MeshStandardMaterial, snap));
+
+    if (snap.geometry) mesh.geometry = snap.geometry;
+    if (snap.materialRef) mesh.material = snap.materialRef;
+    if (snap.material) {
+      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      mats.forEach((m) => applySnapshot(m as THREE.MeshStandardMaterial, snap.material!));
+    }
+    restoredLevels.set(uuid, (snap.level as LevelId | null) ?? null);
+  });
+
+  // Re-point meshLevels at what the restored geometry actually is.
+  const nextLevels = new Map(store.meshLevels);
+  restoredLevels.forEach((level, uuid) => {
+    if (level === null) nextLevels.delete(uuid);
+    else nextLevels.set(uuid, level);
+  });
+
+  useGLBStore.setState({
+    meshLevels: nextLevels,
+    meshEntries: recomputeEntries(store.meshEntries, (uuid) => step.has(uuid)),
   });
   invalidate();
+}
+
+/**
+ * Vertex/triangle counts are cached on the mesh entries and go stale whenever a
+ * geometry is swapped. Rebuild the entries the predicate selects, keeping the
+ * identity of the rest so memoized list rows do not repaint.
+ */
+function recomputeEntries(entries: MeshEntry[], touched: (uuid: string) => boolean): MeshEntry[] {
+  return entries.map((entry) => {
+    if (!touched(entry.uuid)) return entry;
+    const geo = entry.mesh.geometry;
+    const mat = Array.isArray(entry.mesh.material) ? entry.mesh.material[0] : entry.mesh.material;
+    return {
+      ...entry,
+      vertexCount: geo?.attributes?.position?.count ?? 0,
+      faceCount: triangleCount(geo),
+      hasUV: !!geo?.attributes?.uv,
+      hasNormals: !!geo?.attributes?.normal,
+      materialType: mat?.type ?? "—",
+    };
+  });
+}
+
+/** Re-derive the cached per-mesh stats for the given uuids. */
+export function refreshMeshStats(uuids: Iterable<string>) {
+  const touched = new Set(uuids);
+  useGLBStore.setState((s) => ({
+    meshEntries: recomputeEntries(s.meshEntries, (uuid) => touched.has(uuid)),
+  }));
 }

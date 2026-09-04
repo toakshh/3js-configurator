@@ -6,6 +6,7 @@ import { useGLBStore, MeshEntry } from "@/store/glbStore";
 import { ViewportRefs, getMesh, deleteMeshFromViewport } from "@/hooks/useViewport";
 import { toast } from "react-hot-toast";
 import { Trash2, Eye, EyeOff, Box } from "lucide-react";
+import { useConfirm } from "@/components/ConfirmDialog";
 
 function MeshRow({
   entry,
@@ -107,6 +108,7 @@ export default function MeshList({ vpRefs }: { vpRefs: React.MutableRefObject<Vi
   const revision = useGLBStore((s) => s.revision);
 
   const setGlobalWireframe = useGLBStore((s) => s.setGlobalWireframe);
+  const { confirm } = useConfirm();
   const bumpRevision = useGLBStore((s) => s.bumpRevision);
 
   const filtered = useMemo(() => {
@@ -163,24 +165,27 @@ export default function MeshList({ vpRefs }: { vpRefs: React.MutableRefObject<Vi
   );
 
   const confirmDelete = useCallback(
-    (uuid: string, e: React.MouseEvent) => {
+    async (uuid: string, e: React.MouseEvent) => {
       e.stopPropagation();
       const store = useGLBStore.getState();
       const entry = store.meshEntries.find((m) => m.uuid === uuid);
       if (!entry) return;
 
-      toast.dismiss();
-      const confirmed = window.confirm(
-        `Delete "${entry.name}" (${entry.vertexCount.toLocaleString()} verts, ${entry.faceCount.toLocaleString()} tris)?\n\nThis action cannot be undone.`
-      );
-      if (!confirmed) return;
+      const ok = await confirm({
+        variant: "danger",
+        title: "Delete mesh?",
+        message: `"${entry.name}" will be permanently removed from the scene.`,
+        details: `${entry.vertexCount.toLocaleString()} vertices · ${entry.faceCount.toLocaleString()} triangles`,
+        confirmLabel: "Delete",
+        cancelLabel: "Cancel",
+      });
+      if (!ok) return;
 
-      // Removes it from the scene, the uuid/raycast tables and the GPU.
       deleteMeshFromViewport(uuid, vpRefs.current);
       store.removeMesh(uuid);
       toast.success(`Deleted "${entry.name}"`);
     },
-    [vpRefs]
+    [vpRefs, confirm]
   );
 
   if (meshEntries.length === 0) {

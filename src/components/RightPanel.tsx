@@ -4,23 +4,30 @@ import { useGLBStore, ActiveTab } from "@/store/glbStore";
 import MaterialTab from "./MaterialTab";
 import TransformTab from "./TransformTab";
 import InfoTab from "./InfoTab";
+import OptimizeTab from "./OptimizeTab";
+import ExportDialog from "./ExportDialog";
 import {
   ViewportRefs,
   applyHistoryStep,
   snapshotMeshes,
+  stepMatchesScene,
+  refreshMeshStats,
   getMesh,
   invalidate,
 } from "@/hooks/useViewport";
+import { restoreOriginal } from "@/lib/optimizer";
 import { applySnapshot } from "@/lib/matUtils";
-import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
-import { useEffect, useCallback } from "react";
+import { remeasureModel } from "@/lib/glbExport";
+import { useEffect, useCallback, useState } from "react";
 import { toast } from "react-hot-toast";
 import * as THREE from "three";
+import { useConfirm } from "@/components/ConfirmDialog";
 
 const TABS: { id: ActiveTab; label: string; icon: string }[] = [
   { id: "material", label: "Material", icon: "🎨" },
   { id: "transform", label: "Transform", icon: "⇲" },
   { id: "info", label: "Info", icon: "ℹ" },
+  { id: "optimize", label: "Optimize", icon: "⚡" },
 ];
 
 export default function RightPanel({
@@ -40,6 +47,9 @@ export default function RightPanel({
   );
   const historyIndex = useGLBStore((s) => s.historyIndex);
   const historyLength = useGLBStore((s) => s.history.length);
+  const { confirm } = useConfirm();
+  const [exportOpen, setExportOpen] = useState(false);
+  const hasModel = useGLBStore((s) => s.meshEntries.length > 0);
 
   const canUndo = historyIndex > 0;
   const canRedo = historyIndex < historyLength - 1;
@@ -47,10 +57,16 @@ export default function RightPanel({
   const doUndo = useCallback(() => {
     const store = useGLBStore.getState();
     if (store.historyIndex <= 0) return;
-    if (store.historyIndex === store.history.length - 1) {
-      // History entries record the state *before* each edit, so the live scene
-      // is not in the stack yet. Capture it first, otherwise redo can never
-      // bring back the most recent change.
+    const tip = store.history[store.historyIndex];
+    // History entries record the state *before* each edit, so the live scene is
+    // usually not in the stack yet — capture it, or redo can never bring the
+    // most recent change back. Skip it when the tip already matches the scene
+    // (right after a redo), which would otherwise burn an Undo press.
+    if (
+      store.historyIndex === store.history.length - 1 &&
+      tip &&
+      !stepMatchesScene(tip, vpRefs.current)
+    ) {
       store.pushHistoryImmediate(
         snapshotMeshes(
           store.meshEntries.map((e) => e.uuid),
@@ -62,6 +78,8 @@ export default function RightPanel({
     if (!step) return;
     applyHistoryStep(step, vpRefs.current);
     useGLBStore.getState().bumpRevision();
+    // An undone optimization changes the geometry, so the measured size is stale.
+    if (useGLBStore.getState().currentBytes !== null) remeasureModel();
   }, [vpRefs]);
 
   const doRedo = useCallback(() => {
@@ -69,6 +87,7 @@ export default function RightPanel({
     if (!step) return;
     applyHistoryStep(step, vpRefs.current);
     useGLBStore.getState().bumpRevision();
+    if (useGLBStore.getState().currentBytes !== null) remeasureModel();
   }, [vpRefs]);
 
   // Keyboard shortcuts
@@ -90,47 +109,56 @@ export default function RightPanel({
     return () => window.removeEventListener("keydown", handler);
   }, [doUndo, doRedo]);
 
-  const exportGLB = () => {
-    const root = vpRefs.current.gltfRoot;
-    if (!root) { toast.error("Load a GLB first"); return; }
+  const resetAll = async () => {
+    const optimizedCount = useGLBStore.getState().meshLevels.size;
+    const ok = await confirm({
+      variant: "warning",
+      title: "Revert everything to original?",
+      message:
+        optimizedCount > 0
+          ? "Every mesh goes back to the geometry and material it was loaded with. Material edits and all optimization are discarded."
+          : "Every mesh will be reset to its original loaded material. Any edits you made will be lost.",
+      details:
+        optimizedCount > 0
+          ? `${optimizedCount} mesh${optimizedCount === 1 ? "" : "es"} currently optimized`
+          : undefined,
+      confirmLabel: "Revert All",
+      cancelLabel: "Keep Changes",
+    });
+    if (!ok) return;
 
-    const loadingToast = toast.loading("Exporting GLB...");
-
-    const exporter = new GLTFExporter();
-    exporter.parse(
-      root,
-      (result) => {
-        const blob = new Blob([result as ArrayBuffer], { type: "model/gltf-binary" });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = "configured.glb";
-        a.click();
-        URL.revokeObjectURL(url);
-
-        toast.success("Exported as configured.glb", { id: loadingToast });
-      },
-      (err) => {
-        console.error(err);
-        toast.error("Export failed: " + err, { id: loadingToast });
-      },
-      { binary: true }
-    );
-  };
-
-  const resetAll = () => {
-    if (!confirm("Reset ALL meshes to their original loaded material state?")) return;
     const store = useGLBStore.getState();
+    const uuids = store.meshEntries.map((e) => e.uuid);
+
+    // Reverting is a change like any other, so it can be undone.
+    store.pushHistoryImmediate(snapshotMeshes(uuids, vpRefs.current));
+
     store.meshEntries.forEach((entry) => {
       const mesh = getMesh(vpRefs.current, entry.uuid);
+      if (!mesh) return;
+      // Geometry first: this swaps the pristine geometry/material objects back
+      // in, undoing any optimization.
+      restoreOriginal(mesh);
+      // Then replay the loaded material values over whatever material is now in
+      // place, undoing material edits made before the model was optimized.
       const snap = store.snapshots.get(entry.uuid);
-      if (!mesh || !snap) return;
+      if (!snap) return;
       const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
       mats.forEach((m) => applySnapshot(m as THREE.MeshStandardMaterial, snap));
     });
+
+    store.setMeshLevels(uuids, null);
+    refreshMeshStats(uuids);
     invalidate();
-    toast("All materials reset to original", { icon: "↺" });
-    store.bumpRevision();
+    useGLBStore.getState().bumpRevision();
+    if (useGLBStore.getState().currentBytes !== null) remeasureModel();
+
+    toast(
+      optimizedCount > 0
+        ? "Model reverted — materials and optimization undone"
+        : "All materials reset to original",
+      { icon: "↺" }
+    );
   };
 
   return (
@@ -248,18 +276,23 @@ export default function RightPanel({
           <div className={activeTab === "info" ? "block" : "hidden"}>
             <InfoTab vpRefs={vpRefs} />
           </div>
+          <div className={activeTab === "optimize" ? "block" : "hidden"}>
+            <OptimizeTab vpRefs={vpRefs} />
+          </div>
         </div>
 
         {/* ── Export / Reset bar ─────────────────────────── */}
         <div className="px-5 py-4 border-t border-[#1a1f38] bg-[#0c0f1e] space-y-3 shrink-0">
           <button
-            onClick={exportGLB}
-            className="w-full bg-gradient-to-r from-[#5b6ef5] to-[#7c5bf5] hover:from-[#6b7eff] hover:to-[#8c6bff] text-white font-semibold py-3.5 rounded-xl text-[13px] transition-all shadow-lg shadow-[#5b6ef5]/20 flex items-center justify-center gap-2.5"
+            onClick={() => setExportOpen(true)}
+            disabled={!hasModel}
+            title={hasModel ? "Name and download the model" : "Load a .glb first"}
+            className="w-full bg-gradient-to-r from-[#5b6ef5] to-[#7c5bf5] hover:from-[#6b7eff] hover:to-[#8c6bff] text-white font-semibold py-3.5 rounded-xl text-[13px] transition-all shadow-lg shadow-[#5b6ef5]/20 flex items-center justify-center gap-2.5 disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none"
           >
             <svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}>
               <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3" />
             </svg>
-            Export Modified .glb
+            Export .glb…
           </button>
           <button
             onClick={resetAll}
@@ -269,6 +302,13 @@ export default function RightPanel({
           </button>
         </div>
       </div>
+
+      <ExportDialog
+        key={exportOpen ? "export-open" : "export-closed"}
+        open={exportOpen}
+        onClose={() => setExportOpen(false)}
+        vpRefs={vpRefs}
+      />
     </div>
   );
 }

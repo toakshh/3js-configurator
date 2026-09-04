@@ -52,6 +52,12 @@ export function applySnapshot(mat: THREE.MeshStandardMaterial, snap: MaterialSna
   mat.needsUpdate = true;
 }
 
+/** Shallow value comparison — every MaterialSnapshot field is a primitive. */
+export function snapshotsEqual(a: MaterialSnapshot, b: MaterialSnapshot): boolean {
+  const keys = Object.keys(a) as (keyof MaterialSnapshot)[];
+  return keys.every((k) => a[k] === b[k]);
+}
+
 export function getMeshMat(mesh: THREE.Mesh): THREE.MeshStandardMaterial | null {
   const m = mesh.material;
   if (!m) return null;

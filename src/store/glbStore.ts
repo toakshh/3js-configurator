@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import * as THREE from "three";
+import type { LevelId } from "@/lib/optimizer";
 
 export interface MeshEntry {
   uuid: string;
@@ -37,11 +38,33 @@ export interface MaterialSnapshot {
   blending: THREE.Blending;
 }
 
-// A single undo/redo step: map of uuid → MaterialSnapshot
-export type HistoryStep = Map<string, MaterialSnapshot>;
+/**
+ * Everything about one mesh that an undo needs to put back.
+ *
+ * Material edits mutate a material in place, so they are captured as property
+ * values. Optimization swaps whole geometry/material objects, so those are
+ * captured by reference — the optimizer caches every variant it builds for the
+ * life of the model, which is what keeps these references valid.
+ */
+export interface MeshSnapshot {
+  /** Material property values at capture time. */
+  material?: MaterialSnapshot;
+  /** The geometry object in place at capture time. */
+  geometry?: THREE.BufferGeometry;
+  /** The material object(s) in place at capture time. */
+  materialRef?: THREE.Material | THREE.Material[];
+  /** Optimization level in force at capture time; null = pristine. */
+  level?: string | null;
+}
+
+// A single undo/redo step: map of uuid → MeshSnapshot
+export type HistoryStep = Map<string, MeshSnapshot>;
 
 export type EnvMode = "studio" | "outdoor" | "dark" | "none";
-export type ActiveTab = "material" | "transform" | "info";
+export type ActiveTab = "material" | "transform" | "info" | "optimize";
+
+/** Which optimization preset a mesh currently reflects. */
+export type MeshLevels = Map<string, LevelId>;
 
 interface GLBStore {
   scene: THREE.Scene | null;
@@ -75,6 +98,17 @@ interface GLBStore {
    */
   revision: number;
 
+  // ─── optimization / export ──────────────────────────────────────────────
+  /** Editable name used for the exported file. */
+  modelName: string;
+  /** uuid → level currently applied to that mesh. Absent = untouched. */
+  meshLevels: MeshLevels;
+  /** Serialized size of the model as loaded, in bytes. Measured, not estimated. */
+  baselineBytes: number | null;
+  /** Serialized size of the model right now, in bytes. Measured, not estimated. */
+  currentBytes: number | null;
+  measuring: boolean;
+
   // actions
   setScene: (scene: THREE.Scene) => void;
   setGltfRoot: (root: THREE.Group | null) => void;
@@ -103,6 +137,12 @@ interface GLBStore {
   bumpRevision: () => void;
   updateMeshVisibility: (uuid: string, visible: boolean) => void;
   clearAll: () => void;
+
+  setModelName: (name: string) => void;
+  setMeshLevels: (uuids: string[], level: LevelId | null) => void;
+  setBaselineBytes: (bytes: number | null) => void;
+  setCurrentBytes: (bytes: number | null) => void;
+  setMeasuring: (v: boolean) => void;
 
   // history
   pushHistory: (step: HistoryStep) => void;
@@ -138,6 +178,11 @@ export const useGLBStore = create<GLBStore>((set, get) => ({
   history: [],
   historyIndex: -1,
   revision: 0,
+  modelName: "model",
+  meshLevels: new Map(),
+  baselineBytes: null,
+  currentBytes: null,
+  measuring: false,
 
   setScene: (scene) => set({ scene }),
   setGltfRoot: (gltfRoot) => set({ gltfRoot }),
@@ -188,10 +233,13 @@ export const useGLBStore = create<GLBStore>((set, get) => ({
       const nextSelected = new Set(state.selectedUUIDs);
       nextSelected.delete(uuid);
       const nextPrimary = state.selectedUUID === uuid ? null : state.selectedUUID;
+      const nextLevels = new Map(state.meshLevels);
+      nextLevels.delete(uuid);
       return {
         meshEntries: nextMeshEntries,
         selectedUUIDs: nextSelected,
-        selectedUUID: nextPrimary
+        selectedUUID: nextPrimary,
+        meshLevels: nextLevels,
       };
     }),
 
@@ -211,6 +259,19 @@ export const useGLBStore = create<GLBStore>((set, get) => ({
     }),
 
   bumpRevision: () => set((state) => ({ revision: state.revision + 1 })),
+
+  setModelName: (modelName) => set({ modelName }),
+
+  setMeshLevels: (uuids, level) =>
+    set((state) => {
+      const next = new Map(state.meshLevels);
+      uuids.forEach((uuid) => (level === null ? next.delete(uuid) : next.set(uuid, level)));
+      return { meshLevels: next };
+    }),
+
+  setBaselineBytes: (baselineBytes) => set({ baselineBytes }),
+  setCurrentBytes: (currentBytes) => set({ currentBytes }),
+  setMeasuring: (measuring) => set({ measuring }),
 
   setSnapshots: (snapshots) => set({ snapshots }),
 
@@ -232,6 +293,10 @@ export const useGLBStore = create<GLBStore>((set, get) => ({
       globalWireframe: false,
       history: [],
       historyIndex: -1,
+      meshLevels: new Map(),
+      baselineBytes: null,
+      currentBytes: null,
+      measuring: false,
     });
   },
 
