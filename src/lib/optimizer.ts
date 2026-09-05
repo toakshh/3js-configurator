@@ -172,8 +172,9 @@ function disposeEntry({ geometry, material }: Original) {
     if (!m) return;
     for (const slot of TEXTURE_SLOTS) {
       const tex = (m as unknown as Record<string, unknown>)[slot] as THREE.Texture | null;
-      // Only textures this module generated; originals' textures are shared
-      // with the pristine material and are released with it.
+      // Only textures the app generated (downscaled variants, and roughness maps
+      // rebaked from specular-glossiness on load). A texture that came out of the
+      // file is shared with the pristine material and released along with it.
       if (tex?.isTexture && tex.userData?.generated) tex.dispose();
     }
     m.dispose();

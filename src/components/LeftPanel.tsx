@@ -47,7 +47,11 @@ export default function LeftPanel({
         {/* Header */}
         <div className="px-4 py-3 border-b border-[#2e3250] bg-[#22263a] shrink-0">
           <h1 className="text-[15px] font-bold text-[#7c8bff] tracking-wide">🎛 GLB Configurator</h1>
-          <p className="text-[10px] text-[#556] mt-0.5">Three.js mesh inspector & editor</p>
+          <p className="text-[10px] text-[#556] mt-0.5">Three.js mesh inspector & editor by 
+            <a href="https://github.com/toakshh" target="_blank" rel="noopener noreferrer" className="hover:text-[#7c8bff]">
+            <span className="font-bold text-[#7c8bff] tracking-wide">Akshat</span>
+            </a>
+          </p>
         </div>
 
         {/* Drop zone */}

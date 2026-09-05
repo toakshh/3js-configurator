@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useCallback } from "react";
 import * as THREE from "three";
-import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { loadGLTF, disposeDecoders, LoadReport } from "@/lib/gltfLoader";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
@@ -46,25 +46,61 @@ export function getMesh(r: ViewportRefs, uuid: string): THREE.Mesh | null {
 
 // ─── Disposal ─────────────────────────────────────────────────────────────
 
-function disposeMaterial(mat: THREE.Material) {
-  // Textures hang off the material as plain properties; dispose whatever we
-  // find so GPU memory is released along with the material itself.
+function texturesOf(mat: THREE.Material): THREE.Texture[] {
+  const out: THREE.Texture[] = [];
   for (const value of Object.values(mat)) {
-    if (value && (value as THREE.Texture).isTexture) {
-      (value as THREE.Texture).dispose();
-    }
+    if (value && (value as THREE.Texture).isTexture) out.push(value as THREE.Texture);
   }
-  mat.dispose();
+  return out;
 }
 
-/** Release every GPU resource held by a subtree (geometries, materials, textures). */
-export function disposeObject3D(root: THREE.Object3D) {
+function materialsOf(obj: THREE.Object3D): THREE.Material[] {
+  const mesh = obj as THREE.Mesh;
+  if (!mesh.material) return [];
+  return Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+}
+
+/**
+ * Every texture still referenced by anything under `root`.
+ *
+ * A glTF file points many materials at the same image, and this app clones a
+ * material per mesh — which shares the texture objects further still. So a
+ * texture belonging to the mesh being deleted is very often the same object the
+ * nine meshes that remain are drawing with.
+ */
+function texturesInUse(root: THREE.Object3D): Set<THREE.Texture> {
+  const inUse = new Set<THREE.Texture>();
+  root.traverse((obj) => {
+    for (const mat of materialsOf(obj)) {
+      for (const tex of texturesOf(mat)) inUse.add(tex);
+    }
+  });
+  return inUse;
+}
+
+/**
+ * Release every GPU resource held by a subtree.
+ *
+ * `keepAlive` names the scene the subtree is being removed *from*: any texture
+ * still reachable there is left alone. Disposing a shared texture does not
+ * error — it quietly drops the GPU upload, and every other mesh using it
+ * renders white from that moment on. That is the whole reason this takes a
+ * second argument.
+ */
+export function disposeObject3D(root: THREE.Object3D, keepAlive?: THREE.Object3D | null) {
+  // Gather survivors before the subtree is detached, or it would count itself.
+  const survivors = keepAlive ? texturesInUse(keepAlive) : null;
+
   root.traverse((obj) => {
     const mesh = obj as THREE.Mesh;
     if (mesh.geometry) mesh.geometry.dispose();
-    if (!mesh.material) return;
-    const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-    mats.forEach(disposeMaterial);
+    for (const mat of materialsOf(obj)) {
+      for (const tex of texturesOf(mat)) {
+        if (survivors?.has(tex)) continue;
+        tex.dispose();
+      }
+      mat.dispose();
+    }
   });
 }
 
@@ -338,6 +374,7 @@ export function useViewport(canvasRef: React.RefObject<HTMLCanvasElement | null>
       unsubscribe();
       setRenderRequester(null);
       controls.dispose();
+      disposeDecoders();
       clearAllOutlines(r);
       r.outlineMaterial.dispose();
       disposeObject3D(scene);
@@ -359,10 +396,12 @@ export function useViewport(canvasRef: React.RefObject<HTMLCanvasElement | null>
     const store = useGLBStore.getState();
 
     const url = URL.createObjectURL(file);
-    const loader = new GLTFLoader();
-    loader.load(
-      url,
-      (gltf) => {
+    const pending = toast.loading(`Opening ${file.name}\u2026`);
+
+    // The renderer decides which compressed texture formats this GPU can
+    // transcode to, so the loader is configured per load rather than once.
+    loadGLTF(url, r.renderer)
+      .then(({ gltf, report }) => {
         URL.revokeObjectURL(url);
         if (r.gltfRoot) {
           r.scene!.remove(r.gltfRoot);
@@ -440,14 +479,13 @@ export function useViewport(canvasRef: React.RefObject<HTMLCanvasElement | null>
         });
         store.pushHistoryImmediate(initial);
         frameAll(r);
-      },
-      undefined,
-      (err) => {
+        reportLoad(file.name, entries.length, report, pending);
+      })
+      .catch((err) => {
         URL.revokeObjectURL(url);
         console.error(err);
-        toast.error("Failed to load GLB — check it's a valid .glb file.", { duration: 5000 });
-      }
-    );
+        toast.error(describeLoadError(err), { id: pending, duration: 8000 });
+      });
   }, [refs]);
 
   // ─── Canvas click with multi-select ──────────────────────────────────
@@ -491,7 +529,9 @@ export function deleteMeshFromViewport(uuid: string, r: ViewportRefs) {
   if (!mesh) return;
   removeOutline(uuid, r);
   if (mesh.parent) mesh.parent.remove(mesh);
-  disposeObject3D(mesh);
+  // The rest of the model usually shares this mesh's textures; hand the scene
+  // in so those survive.
+  disposeObject3D(mesh, r.scene);
   r.meshMap.delete(uuid);
   r.allMeshes = r.allMeshes.filter((m) => m !== mesh);
   invalidate();
@@ -689,4 +729,62 @@ export function refreshMeshStats(uuids: Iterable<string>) {
   useGLBStore.setState((s) => ({
     meshEntries: recomputeEntries(s.meshEntries, (uuid) => touched.has(uuid)),
   }));
+}
+
+// ─── Load reporting ───────────────────────────────────────────────────────
+
+/**
+ * Say what happened, naming anything that had to be approximated.
+ *
+ * A model that silently renders white is the worst possible outcome: the user
+ * has no way to tell a broken file from a broken app. So when a repair was
+ * needed, say so, and when something is genuinely unsupported, name it.
+ */
+function reportLoad(fileName: string, meshCount: number, report: LoadReport, toastId: string) {
+  const notes: string[] = [];
+
+  if (report.specGlossConverted > 0) {
+    notes.push(
+      `${report.specGlossConverted} specular-glossiness material${
+        report.specGlossConverted === 1 ? "" : "s"
+      } converted`
+    );
+  }
+  if (report.unsupportedExtensions.length) {
+    notes.push(`unsupported: ${report.unsupportedExtensions.join(", ")}`);
+  }
+
+  const suffix = notes.length ? ` \u00b7 ${notes.join(" \u00b7 ")}` : "";
+  toast.success(`${fileName} \u00b7 ${meshCount} mesh${meshCount === 1 ? "" : "es"}${suffix}`, {
+    id: toastId,
+    duration: notes.length ? 7000 : 3000,
+  });
+
+  if (report.specGlossConverted > 0) {
+    console.info(
+      `Converted ${report.specGlossConverted} material(s) from KHR_materials_pbrSpecularGlossiness, ` +
+        `which Three.js no longer supports. ${report.glossMapsBaked} glossiness map(s) rebaked as roughness.`
+    );
+  }
+  if (report.untexturedMaterials > 0) {
+    console.warn(
+      `${report.untexturedMaterials} material(s) have no base colour texture even though this file ` +
+        `contains images. They will render in flat colour.`
+    );
+  }
+}
+
+/** Turn a loader failure into a message that names the likely cause. */
+function describeLoadError(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  if (/KTX2|basisu/i.test(message)) {
+    return "This file uses KTX2 textures and the transcoder failed to start. Reload the page and try again.";
+  }
+  if (/draco/i.test(message)) {
+    return "This file uses Draco compression and the decoder failed to start. Reload the page and try again.";
+  }
+  if (/meshopt/i.test(message)) {
+    return "This file uses meshopt compression and the decoder failed to load. Reload the page and try again.";
+  }
+  return "Could not open that file — check it is a valid .glb or .gltf.";
 }
