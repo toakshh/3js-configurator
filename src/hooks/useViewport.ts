@@ -3,6 +3,12 @@
 import { useEffect, useRef, useCallback } from "react";
 import * as THREE from "three";
 import { loadGLTF, disposeDecoders, LoadReport } from "@/lib/gltfLoader";
+import {
+  bindClips,
+  disposePlayer,
+  getSnapshot as getPlayerState,
+  tick as tickClips,
+} from "@/lib/clipPlayer";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
@@ -349,15 +355,20 @@ export function useViewport(canvasRef: React.RefObject<HTMLCanvasElement | null>
     ro.observe(parent);
     renderer.setSize(parent.clientWidth, parent.clientHeight);
 
+    const clock = new THREE.Clock();
+
     function animate() {
       animFrameRef.current = requestAnimationFrame(animate);
 
       const cameraMoved = controls.update();
+      // Advance any playing clip. Returns false while nothing is playing, so a
+      // model sitting still costs exactly what it did before.
+      const animating = tickClips(clock.getDelta());
       // The dashed outline only animates while something is selected.
       const hasOutlines = refs.current.outlineLines.size > 0;
       if (hasOutlines) animateOutlines(refs.current);
 
-      if (!needsRender && !cameraMoved && !hasOutlines) return;
+      if (!needsRender && !cameraMoved && !hasOutlines && !animating) return;
       needsRender = false;
 
       const cam =
@@ -374,6 +385,7 @@ export function useViewport(canvasRef: React.RefObject<HTMLCanvasElement | null>
       unsubscribe();
       setRenderRequester(null);
       controls.dispose();
+      disposePlayer();
       disposeDecoders();
       clearAllOutlines(r);
       r.outlineMaterial.dispose();
@@ -465,6 +477,10 @@ export function useViewport(canvasRef: React.RefObject<HTMLCanvasElement | null>
         // One store write for every snapshot instead of one write per mesh.
         store.setSnapshots(snapshots);
         store.setMeshEntries(entries);
+
+        // The mixer binds to the model root, so this has to wait until the
+        // scene graph is final.
+        bindClips(gltf.scene, gltf.animations ?? []);
 
         // Seed history with the pristine state — geometry included — so undoing
         // all the way back lands on the model exactly as it was loaded.
@@ -752,6 +768,11 @@ function reportLoad(fileName: string, meshCount: number, report: LoadReport, toa
   }
   if (report.unsupportedExtensions.length) {
     notes.push(`unsupported: ${report.unsupportedExtensions.join(", ")}`);
+  }
+
+  const clipCount = getPlayerState().clips.length;
+  if (clipCount > 0) {
+    notes.unshift(`${clipCount} animation${clipCount === 1 ? "" : "s"}`);
   }
 
   const suffix = notes.length ? ` \u00b7 ${notes.join(" \u00b7 ")}` : "";

@@ -4,6 +4,7 @@ import { useEffect } from "react";
 import * as THREE from "three";
 import { useGLBStore, EnvMode } from "@/store/glbStore";
 import { ViewportRefs, frameAll, frameSelected } from "@/hooks/useViewport";
+import AnimationPanel from "./AnimationPanel";
 
 const ENV_LABELS: Record<EnvMode, string> = {
   studio: "Studio",
@@ -184,6 +185,9 @@ export default function ViewportInner({
           )}
         </div>
       )}
+
+      {/* Animation clips found in the file; renders nothing without them. */}
+      <AnimationPanel />
 
       {/* Bottom toolbar */}
       <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex gap-1.5 pointer-events-auto">

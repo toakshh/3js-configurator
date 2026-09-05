@@ -49,7 +49,7 @@ export default function LeftPanel({
           <h1 className="text-[15px] font-bold text-[#7c8bff] tracking-wide">🎛 GLB Configurator</h1>
           <p className="text-[10px] text-[#556] mt-0.5">Three.js mesh inspector & editor by 
             <a href="https://github.com/toakshh" target="_blank" rel="noopener noreferrer" className="hover:text-[#7c8bff]">
-            <span className="font-bold text-[#7c8bff] tracking-wide">Akshat</span>
+            <span className="font-bold text-[#7c8bff] tracking-wide"> Akshat</span>
             </a>
           </p>
         </div>
